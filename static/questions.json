@@ -1,0 +1,70 @@
+{
+  "depression_gds5": {
+    "category": "우울",
+    "name": "Hoyl GDS-5",
+    "instructions": {
+      "min_questions": 1
+    },
+    "items": [
+      {"id": "gds5_1", "question": "근본적으로 생활에 불만을 느끼시나요?"},
+      {"id": "gds5_2", "question": "자주 지루하다고 느끼시나요?"},
+      {"id": "gds5_3", "question": "자주 무력감을 느끼시나요?"},
+      {"id": "gds5_4", "question": "밖에 나가 새로운 일을 하는 것보다 집에 있는 것이 좋으신가요?"},
+      {"id": "gds5_5", "question": "현재의 생활방식이 매우 가치 없다고 느끼시나요?"}
+    ]
+  },
+  "anxiety_gad2": {
+    "category": "불안",
+    "name": "GAD-2",
+    "instructions": {
+      "min_questions": 1
+    },
+    "items": [
+      {"id": "gad2_1", "question": "최근 초조하거나 불안하거나 조마조마한 느낌이 드셨나요?"},
+      {"id": "gad2_2", "question": "최근 걱정을 멈추거나 조절하기 어려우셨나요?"}
+    ]
+  },
+  "physical_health": {
+    "category": "신체건강",
+    "name": "자기평가 건강 + FRAIL",
+    "instructions": {
+      "min_questions": 1
+    },
+    "items": [
+      {"id": "health_self_rating", "question": "전반적으로 본인의 건강 상태를 어떻게 평가하시나요?"},
+      {"id": "frail_fatigue", "question": "지난 4주간 얼마나 자주 피곤하다고 느끼셨나요?"},
+      {"id": "frail_stairs", "question": "도움 없이 혼자서, 쉬지 않고 계단 10개를 오르는 데 어려움이 있으신가요?"},
+      {"id": "frail_walk", "question": "도움 없이 혼자서, 한 블록(약 100m) 정도를 걷는 데 어려움이 있으신가요?"},
+      {"id": "frail_illness", "question": "의사로부터 다음 11개 질환 중 5개 이상을 진단받은 적이 있으신가요? (고혈압, 당뇨, 암, 만성폐질환, 심근경색, 울혈성심부전, 협심증, 천식, 관절염, 뇌졸중, 신장질환)"},
+      {"id": "frail_weight_loss", "question": "지난 1년간 의도치 않게 체중이 5% 이상 줄어드셨나요?"},
+      {"id": "fall_gate", "question": "지난 1년간 넘어지신 적이 있으신가요?"},
+      {"id": "fall_unsteady", "question": "서 있거나 걸을 때 불안정하다고 느끼시나요?"},
+      {"id": "fall_worry", "question": "넘어질까봐 걱정되시나요?"}
+    ]
+  },
+  "cognitive_sis": {
+    "category": "인지기능",
+    "name": "SIS",
+    "instructions": {
+      "min_questions": 1
+    },
+    "items": [
+      {"id": "sis_encode", "type": "statement", "question": "제가 단어 세 개를 말씀드릴게요 — 이따 다시 여쭤볼 테니 기억해 두세요.", "note": "채점 대상 아님. 매번 새로운 일상 단어 3개를 무작위로 생성해 말한다."},
+      {"id": "sis_recall", "type": "question", "question": "아까 말씀드렸던 세 단어가 기억나시나요?", "requires": {"item": "sis_encode", "min_gap_questions": 2}},
+      {"id": "sis_day", "question": "오늘이 무슨 요일인지 아시나요?"},
+      {"id": "sis_month", "question": "지금이 몇 월인지 아시나요?"},
+      {"id": "sis_year", "question": "올해가 몇 년도인지 아시나요?"}
+    ]
+  },
+  "daily_check": {
+    "category": "복약/식사",
+    "name": "복약/식사 확인",
+    "instructions": {
+      "min_questions": 2
+    },
+    "items": [
+      {"id": "medication", "question": "오늘 약은 챙겨 드셨나요?"},
+      {"id": "meal", "question": "오늘 식사는 하셨나요?"}
+    ]
+  }
+}

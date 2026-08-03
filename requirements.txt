@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+openai          # worker.py's email drafting (chat completions via the OpenAI SDK)
+python-dotenv
+websockets      # server.py's realtime voice proxy (wss://api.x.ai/v1/realtime)
+requests        # server.py's /tts endpoint (xAI's native TTS, used by index2.html only)

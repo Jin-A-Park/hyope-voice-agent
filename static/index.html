@@ -1,0 +1,323 @@
+<!doctype html>
+<!--
+  어르신 안부전화 — the browser side.
+
+    * "시작하기"는 /ws/call 웹소켓을 열고, 그 순간부터 마이크가 계속 열려
+      있는 실시간 통화다 (버튼을 누르고 있을 필요 없음 — server_vad가
+      알아서 말이 끝난 시점을 판단한다).
+    * 에이전트가 tool을 호출할 때마다 칩으로 표시하고, end_call이 오면
+      (call_ended) 통화를 스스로 정리하고 "시작하기"로 되돌아간다.
+    * 헤드폰 없이 스피커로 들으면 마이크가 에이전트 목소리를 다시 주워
+      담을 수 있다 — 데모 환경에서는 헤드폰 사용을 권장.
+-->
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>어르신 안부전화</title>
+<style>
+  :root {
+    --bg: #0f1117; --panel: #181b24; --text: #e8eaf0; --dim: #8b90a0;
+    --accent: #e4573d; --elder: #4e9af1; --agent: #4ecf8a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; flex-direction: column;
+    align-items: center; background: var(--bg); color: var(--text);
+    font: 16px/1.5 system-ui, sans-serif; padding: 2rem 1rem;
+  }
+  h1 { font-size: 1.2rem; font-weight: 600; margin: 0 0 .25rem; }
+  #status { color: var(--dim); min-height: 1.5em; margin-bottom: 1.5rem; }
+
+  #start, #hangup {
+    width: 9rem; height: 9rem; border-radius: 50%; border: none;
+    background: var(--accent); color: #fff; font: 600 1rem system-ui;
+    cursor: pointer; transition: transform .1s, box-shadow .1s;
+  }
+  #hangup { background: #3a3f4e; }
+  #call.live #hangup { box-shadow: 0 0 0 12px rgba(228,87,61,.2); }
+  #start:disabled { background: #3a3f4e; cursor: not-allowed; }
+
+  #reset {
+    margin-top: 1rem; background: none; border: 1px solid #3a3f4e; color: var(--dim);
+    border-radius: 8px; padding: .35rem .9rem; font: 500 .85rem system-ui; cursor: pointer;
+  }
+  #reset:hover { color: var(--text); border-color: var(--dim); }
+
+  #log { width: 100%; max-width: 40rem; margin-top: 2rem; display: flex; flex-direction: column; gap: .6rem; }
+  .msg { display: flex; flex-direction: column; max-width: 80%; }
+  .msg.elder { align-self: flex-end; align-items: flex-end; }
+  .msg.agent { align-self: flex-start; align-items: flex-start; }
+  .bubble { background: var(--panel); border-radius: 14px; padding: .55rem .85rem; white-space: pre-wrap; }
+  .msg.elder .bubble { background: var(--elder); color: #fff; border-bottom-right-radius: 4px; }
+  .msg.agent .bubble { border-bottom-left-radius: 4px; }
+  .msg .who { font-size: .7rem; color: var(--dim); margin: 0 .3rem .2rem; }
+  .err { background: #3a1f22; color: #ff9a8f; border-radius: 10px; padding: .6rem .9rem; white-space: pre-wrap; }
+
+  .tools { display: flex; gap: .4rem; flex-wrap: wrap; margin: .2rem 0; }
+  .tools span {
+    display: inline-block; font: 500 .75rem ui-monospace, monospace;
+    background: rgba(78,207,138,.12); color: var(--agent);
+    border: 1px solid rgba(78,207,138,.4); border-radius: 999px;
+    padding: .15rem .6rem;
+  }
+</style>
+</head>
+<body>
+  <h1>어르신 안부전화</h1>
+  <div id="status">Loading…</div>
+
+  <div id="call">
+    <button id="start" disabled>시작하기</button>
+    <button id="hangup" style="display:none">통화<br>종료</button>
+  </div>
+  <button id="reset">✕ new call</button>
+
+  <div id="log"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const status = (msg) => { $("status").textContent = msg; };
+
+let mediaStream = null;
+let inputCtx = null, processor = null, micSource = null, muteGain = null;
+let outputCtx = null;
+let nextPlayTime = 0;
+let ws = null;
+
+const OUTPUT_SAMPLE_RATE = 24000; // must match server.py's session.output_audio_format assumption
+
+async function init() {
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+  } catch (e) {
+    status("Mic permission denied (or not on localhost/HTTPS): " + e.message);
+    return;
+  }
+  $("start").disabled = false;
+  status("버튼을 눌러 통화를 시작하세요.");
+}
+
+function beginUi() {
+  $("start").style.display = "none";
+  $("hangup").style.display = "";
+  $("call").classList.add("live");
+  status("통화 중… (헤드폰 사용을 권장합니다)");
+}
+
+function endUi(message) {
+  $("hangup").style.display = "none";
+  $("start").style.display = "";
+  $("start").disabled = false;
+  $("call").classList.remove("live");
+  status(message ?? "통화가 종료되었습니다. 다시 시작하려면 버튼을 누르세요.");
+}
+
+// --- mic capture: PCM16 mono @ 24kHz, base64-framed over the websocket ---
+
+function downsampleTo24k(float32, inRate, outRate) {
+  if (outRate === inRate) return float32;
+  const ratio = inRate / outRate;
+  const outLength = Math.round(float32.length / ratio);
+  const out = new Float32Array(outLength);
+  for (let i = 0; i < outLength; i++) {
+    const srcIndex = i * ratio;
+    const i0 = Math.floor(srcIndex), i1 = Math.min(i0 + 1, float32.length - 1);
+    const frac = srcIndex - i0;
+    out[i] = float32[i0] * (1 - frac) + float32[i1] * frac;
+  }
+  return out;
+}
+
+function floatTo16BitPCM(float32) {
+  const out = new Int16Array(float32.length);
+  for (let i = 0; i < float32.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return out;
+}
+
+function bufferToBase64(buf) {
+  let binary = "";
+  const bytes = new Uint8Array(buf);
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+function base64ToInt16(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Int16Array(bytes.buffer);
+}
+
+function startMicStreaming() {
+  inputCtx = new (window.AudioContext || window.webkitAudioContext)();
+  micSource = inputCtx.createMediaStreamSource(mediaStream);
+  processor = inputCtx.createScriptProcessor(4096, 1, 1);
+  muteGain = inputCtx.createGain();
+  muteGain.gain.value = 0; // keep the graph alive without echoing the mic back to speakers
+
+  processor.onaudioprocess = (e) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const input = e.inputBuffer.getChannelData(0);
+    const down = downsampleTo24k(input, inputCtx.sampleRate, OUTPUT_SAMPLE_RATE);
+    const pcm16 = floatTo16BitPCM(down);
+    ws.send(JSON.stringify({ type: "audio", audio: bufferToBase64(pcm16.buffer) }));
+  };
+
+  micSource.connect(processor);
+  processor.connect(muteGain);
+  muteGain.connect(inputCtx.destination);
+}
+
+function stopMicStreaming() {
+  if (processor) { processor.disconnect(); processor.onaudioprocess = null; processor = null; }
+  if (micSource) { micSource.disconnect(); micSource = null; }
+  if (muteGain) { muteGain.disconnect(); muteGain = null; }
+  if (inputCtx) { inputCtx.close(); inputCtx = null; }
+}
+
+// --- playback: schedule each PCM16 delta back-to-back, no gaps ---
+
+const JITTER_BUFFER_SEC = 0.06; // 서버->브라우저 네트워크 흔들림 대비 완충 (40~100ms대 중간값)
+
+function playDelta(base64Audio) {
+  if (!outputCtx) {
+    outputCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: OUTPUT_SAMPLE_RATE });
+    nextPlayTime = 0;
+  }
+  const int16 = base64ToInt16(base64Audio);
+  const float32 = new Float32Array(int16.length);
+  for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 0x8000;
+
+  const buffer = outputCtx.createBuffer(1, float32.length, OUTPUT_SAMPLE_RATE);
+  buffer.copyToChannel(float32, 0);
+
+  const source = outputCtx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(outputCtx.destination);
+
+  // 이미 재생 예약이 밀려 있으면(같은 턴 안) 이어붙이고, 새 턴이 막 시작되는 참이면
+  // (예약이 과거로 남아있으면) 지터 버퍼만큼 여유를 두고 시작한다 — 0에 가깝게 잡으면
+  // 네트워크가 잠깐만 흔들려도 소리가 끊긴다(underrun).
+  const startAt = nextPlayTime > outputCtx.currentTime
+    ? nextPlayTime
+    : outputCtx.currentTime + JITTER_BUFFER_SEC;
+  source.start(startAt);
+  nextPlayTime = startAt + buffer.duration;
+}
+
+// --- call lifecycle ---
+
+$("start").addEventListener("click", startCall);
+$("hangup").addEventListener("click", () => hangUp());
+$("reset").addEventListener("click", () => { hangUp(); $("log").innerHTML = ""; });
+
+function startCall() {
+  $("start").disabled = true;
+  status("연결 중…");
+
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws/call`);
+
+  ws.onopen = () => {};
+  ws.onmessage = (evt) => handleServerMessage(JSON.parse(evt.data));
+  ws.onerror = () => addError("연결에 실패했습니다.");
+  ws.onclose = () => { stopMicStreaming(); endUi(); };
+}
+
+function hangUp() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "hangup" }));
+    ws.close();
+  }
+  stopMicStreaming();
+  endUi();
+}
+
+let currentAgentBubble = null;
+let currentElderBubble = null;
+
+function handleServerMessage(msg) {
+  switch (msg.type) {
+    case "ready":
+      startMicStreaming();
+      beginUi();
+      break;
+    case "audio":
+      playDelta(msg.audio);
+      break;
+    case "transcript":
+      appendTranscript(msg.role, msg.delta, msg.text);
+      break;
+    case "tool_used":
+      addToolChip(msg.name);
+      break;
+    case "turn_done":
+      currentAgentBubble = null;
+      break;
+    case "call_ended":
+      status("통화가 종료되었습니다.");
+      hangUp();
+      break;
+    case "error":
+      addError(msg.message);
+      break;
+  }
+}
+
+function bubbleFor(role) {
+  const cls = role === "elder" ? "elder" : "agent";
+  const label = role === "elder" ? "어르신" : "Agent";
+  if (role === "elder" && currentElderBubble) return currentElderBubble;
+  if (role === "agent" && currentAgentBubble) return currentAgentBubble;
+
+  const div = document.createElement("div");
+  div.className = `msg ${cls}`;
+  div.innerHTML = `<div class="who">${label}</div><div class="bubble"></div>`;
+  $("log").appendChild(div);
+  if (role === "elder") currentElderBubble = div; else currentAgentBubble = div;
+  return div;
+}
+
+function appendTranscript(role, delta, fullText) {
+  const div = bubbleFor(role);
+  const bubble = div.querySelector(".bubble");
+  if (fullText !== undefined && fullText !== null) {
+    bubble.textContent = fullText;
+    if (role === "elder") currentElderBubble = null; // next turn starts a fresh bubble
+  } else {
+    bubble.textContent += delta ?? "";
+  }
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+function addToolChip(name) {
+  let holder = $("log").lastElementChild;
+  let tools = holder && holder.classList.contains("tools") ? holder : null;
+  if (!tools) {
+    tools = document.createElement("div");
+    tools.className = "tools";
+    $("log").appendChild(tools);
+  }
+  const chip = document.createElement("span");
+  chip.textContent = "🔧 " + name;
+  tools.appendChild(chip);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+function addError(message) {
+  const div = document.createElement("div");
+  div.className = "err";
+  div.textContent = message;
+  $("log").appendChild(div);
+}
+
+init();
+</script>
+</body>
+</html>
