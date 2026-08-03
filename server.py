@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import time
 import uuid
 from datetime import datetime
@@ -23,7 +24,7 @@ log = logging.getLogger("dispatcher")
 
 app = FastAPI(title="HYOPE AI voice agent")
 
-GUARDIAN_ALERTS_FILE = Path("alerts/inbox.jsonl")    # 위급_조기종료 시 여기 한 줄 추가
+#GUARDIAN_ALERTS_FILE = Path("alerts/inbox.jsonl")    # 위급_조기종료 시 여기 한 줄 추가
 
 
 def require_env(name: str) -> str:
@@ -52,7 +53,7 @@ def turn_detection_config() -> dict:
         "idle_timeout_ms": int(os.environ.get("IDLE_TIMEOUT_MS", "30000")),
     }
 
-#주변이 시끄러울 때 임시 테스트용;;;
+'''
 def synthesize_speech(text: str) -> bytes:
     """xAI의 네이티브 TTS 엔드포인트(mp3 bytes 반환) — index2.html이 타이핑한 텍스트를
 
@@ -69,8 +70,9 @@ def synthesize_speech(text: str) -> bytes:
     )
     resp.raise_for_status()
     return resp.content
+'''
 
-
+#실제 전화 연결이되면 생성, 툴 호출될 때마다 retrieve되거나 값이 업데이트됨
 def new_call_state() -> dict:
     """One call's state — lives only as long as its websocket connection
 
@@ -97,12 +99,20 @@ SYSTEM_PROMPT = (
     "짧고 자연스러운 한두 문장으로만 말하세요. \n\n"
 
     "greeting에 대한 어르신 답변이 온 후, "
-    "통화는 우울, 불안, 신체 건강, 인지 기능, 복약/식사 다섯 가지 영역을 순서대로 다루며, 각 영역마다 "
-    "정해진 질문들을 자연스러운 대화 흐름 속에서 물어봅니다. 어르신이 질문에 실질적으로 답했다면 "
+    "통화는 취미/근황, 우울, 불안, 신체 건강, 인지 기능, 복약/식사 여섯 가지 영역을 순서대로 "
+    "다루며, 각 영역마다 정해진 질문들을 자연스러운 대화 흐름 속에서 물어봅니다. 취미/근황은 "
+    "임상 평가가 아니라 자연스러운 안부 대화이니, 인사 직후 편안한 분위기로 시작해 본 질문(우울 "
+    "이하)으로 자연스럽게 넘어가는 다리 역할로 다루세요 — 그래도 log_answer_analysis 추적과 "
+    "카테고리 완료 규칙은 다른 영역과 똑같이 적용됩니다. 어르신이 질문에 실질적으로 답했다면 "
     "그 답변을 해당 영역의 임상적 관점에서 해석하여 category, question_id(방금 물어본 질문의 "
     "id — 질문은행에 [id]로 표시되어 있습니다), assessment, reason 값을 채운 뒤 log_answer_analysis를 "
     "호출하세요. assessment는 답변 내용이 뚜렷한 문제를 시사하지 않으면 good, 경미하거나 애매한 "
     "우려가 있으면 concern, 판단하기 어려우면 unknown, 즉각적인 위험이 느껴지면 urgent로 판단합니다.\n\n"
+
+    "카테고리를 넘어갈 때는 곧바로 다음 질문으로 들어가지 말고, 매번 쿠션어로 부드럽게 운을 뗀 "
+    "뒤 시작하세요. 예를 들어 '이제 건강 관련해서 좀 여쭤봐도 될까요?', '괜찮으시다면 마음 상태도 "
+    "여쭤볼게요' 같은 식입니다. 카테고리마다 다른 표현을 쓰고, 매번 기계적으로 똑같은 문구를 "
+    "반복하지 마세요.\n\n"
 
     "어떤 질문을 이미 물어봤는지는 당신의 기억이 아니라 log_answer_analysis 호출 결과가 정답입니다 "
     "— 결과에 담긴 remaining_questions_in_category(그 카테고리에서 아직 안 물어본 질문 목록)와 "
@@ -152,6 +162,45 @@ GREETING_PROMPT = (
 # 우울 <-> "depression_gds5" 등 실제 질문 목록. 리얼타임 모델은 스스로 질문을
 # 골라야 하므로, 전체 질문은행을 텍스트로 풀어 SYSTEM_PROMPT에 통째로 붙여 넣는다.
 QUESTIONS: dict = json.loads(Path("static/questions.json").read_text())
+
+
+def _load_recipient_profile_block() -> dict:
+    """어르신의 취미/최근 2주 특이사항(static/recipient_profile.json, 실제 배포에선
+
+    어르신별로 달라지고 개인정보라 gitignore 대상)을 questions.json의 카테고리와
+    똑같은 모양(category/instructions/items)으로 바꿔, 다른 임상 카테고리와 완전히
+    같은 방식(log_answer_analysis 추적, 반복 방지, 완료 판정)으로 다뤄지게 한다.
+    실제 문장은 모델이 자연스럽게 다듬도록 "여쭤보세요" 지시문 형태로만 준다.
+    """
+    path = Path("static/recipient_profile.json")
+    profile = json.loads(path.read_text()) if path.exists() else {}
+
+    items = []
+    for i, hobby in enumerate(profile.get("hobbies", []), start=1):
+        items.append({
+            "id": f"hobby_{i}",
+            "question": f"평소 취미이신 '{hobby}', 요즘도 하고 계신지 편하게 여쭤보세요.",
+        })
+    for i, event in enumerate(profile.get("recent_events", []), start=1):
+        items.append({
+            "id": f"event_{i}",
+            "question": f"최근에 있었다고 들은 '{event}'에 대해 어떠셨는지 자연스럽게 여쭤보세요.",
+        })
+
+    return {
+        "category": "취미/근황",
+        "name": "개인 근황",
+        "instructions": {"min_questions": 1},
+        "items": items,
+    }
+
+
+# 취미/근황을 다른 임상 카테고리보다 먼저 오게 앞에 꽂는다 — 인사 직후 부드러운
+# 안부 대화로 시작해서 자연스럽게 본 질문으로 넘어가려는 의도(딕셔너리는 삽입
+# 순서를 유지하므로 이 순서가 곧 CATEGORIES 순서, 곧 진행 순서가 된다).
+_profile_block = _load_recipient_profile_block()
+if _profile_block["items"]:
+    QUESTIONS = {"recipient_profile": _profile_block, **QUESTIONS}
 
 # 5가지 상태 확인 영역과 카테고리별 최종판단 값. CATEGORIES는 questions.json에서
 # 그대로 뽑아써서 두 곳의 목록이 어긋날 일이 없게 한다. 모델이 부르는
@@ -349,6 +398,7 @@ def log_answer_analysis(state: dict, category: str, question_id: str, assessment
         item["question"] for item in CATEGORY_ITEMS.get(category, [])
         if item["id"] not in asked and _gap_satisfied(state, item)
     ]
+    random.shuffle(remaining)  # questions.json 순서대로 매번 똑같이 물어보지 않게
 
     # sis_encode 같은 "채점 대상 아님" 안내문(type: statement)은 진짜 답변이 아니므로
     # good을 찍어도 카테고리를 끝내면 안 된다 — 안 그러면 그 뒤에 이어질 실제 문항들
@@ -374,11 +424,23 @@ def log_answer_analysis(state: dict, category: str, question_id: str, assessment
     if assessment == "알수없음":
         state["pending_retry"].append({"category": category, "question_id": question_id})
 
+    # sis_recall처럼 "나중에 다시 여쭤보겠다"고 예고한 gap-conditional 항목은, good이
+    # 떠서 카테고리가 지금 바로 닫히더라도 그냥 버려지면 안 된다(약속을 어기게 됨) —
+    # 아직 안 물어봤다면 pending_retry에 담아 통화 끝에 반드시 다시 물어보게 한다.
+    already_queued = {(p["category"], p["question_id"]) for p in state["pending_retry"]}
+    for item in CATEGORY_ITEMS.get(category, []):
+        if item["id"] not in asked and item.get("requires") and (category, item["id"]) not in already_queued:
+            state["pending_retry"].append({"category": category, "question_id": item["id"]})
+
     state["completed_categories"].add(category)
     pending_categories = [c for c in CATEGORIES if c not in state["completed_categories"]]
 
     if pending_categories:
-        next_step = f"'{category}' 카테고리는 끝났습니다. 다음 카테고리 '{pending_categories[0]}'로 넘어가세요."
+        next_step = (
+            f"'{category}' 카테고리는 끝났습니다. 쿠션어로 부드럽게 운을 뗀 뒤 다음 카테고리 "
+            f"'{pending_categories[0]}'로 넘어가세요(예: '이제 {pending_categories[0]} 관련해서 "
+            "좀 여쭤봐도 될까요?')."
+        )
     elif state["pending_retry"]:
         retry = state["pending_retry"][0]
         retry_question = _find_question(retry["question_id"])
