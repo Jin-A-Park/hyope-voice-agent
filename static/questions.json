@@ -50,7 +50,7 @@
     },
     "items": [
       {"id": "sis_encode", "type": "statement", "question": "제가 단어 세 개를 말씀드릴게요 — 이따 다시 여쭤볼 테니 기억해 두세요.", "note": "채점 대상 아님. 매번 새로운 일상 단어 3개를 무작위로 생성해 말한다."},
-      {"id": "sis_recall", "type": "question", "question": "아까 말씀드렸던 세 단어가 기억나시나요?", "requires": {"item": "sis_encode", "min_gap_questions": 2}},
+      {"id": "sis_recall", "type": "question", "question": "아까 말씀드렸던 세 단어가 기억나시나요?", "note": "질문할 때 정답을 어르신에게 노출하지 말 것.", "requires": {"item": "sis_encode", "min_gap_questions": 2}},
       {"id": "sis_day", "question": "오늘이 무슨 요일인지 아시나요?"},
       {"id": "sis_month", "question": "지금이 몇 월인지 아시나요?"},
       {"id": "sis_year", "question": "올해가 몇 년도인지 아시나요?"}

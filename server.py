@@ -569,7 +569,7 @@ async def _pump_downstream(client_ws: WebSocket, upstream) -> None:
             return
 
 
-async def _pump_upstream(upstream, client_ws: WebSocket, state: dict) -> None:
+async def _pump_upstream(upstream, client_ws: WebSocket, state: dict, session_id: str) -> None:
     """xAI realtime ws에서 오는 이벤트를 처리하고, 재생용 오디오/자막/칩을 브라우저로 보낸다."""
     ending = False
     # 툴 호출이 있었던 응답은 response.done 이후 우리가 곧바로 response.create로
@@ -577,6 +577,25 @@ async def _pump_upstream(upstream, client_ws: WebSocket, state: dict) -> None:
     # 겹쳐 응답이 통째로 비어버린다(실제로 겪은 버그). 그래서 "이 응답이 이어질
     # 예정이다"를 추적해, 진짜로 할 말이 끝난 response.done에서만 turn_done을 보낸다.
     awaiting_continuation = False
+
+    # 지연시간 계측: 구간 시작 시각만 들고 있다가, 그 구간을 끝내는 이벤트가 오면
+    # 그 시각과의 차이를 ms로 로그에 남긴다(perf_counter라 단조 증가만 보장하면 됨).
+    timing = {
+        "voice_in": None,   # 어르신 발화 STT 완료 시각 — ~툴 선정까지 구간의 시작점
+        "tool_called": None,  # 가장 최근 툴 호출 시각 — ~다음 답변 생성 시작까지 구간의 시작점
+    }
+
+    # 실제 대화 내용 로깅: 에이전트 발화는 delta로 쪼개져 오므로 한 턴이 끝날 때까지
+    # 모았다가 한 줄로 찍는다. 어르신 발화는 STT 결과가 이미 완성된 문장으로 온다.
+    agent_text_parts: list[str] = []
+
+    def _mark_answer_started() -> None:
+        """response.output_audio(.transcript).delta가 오는 시점 = LLM 답변 생성 시작."""
+        if timing["tool_called"] is None:
+            return
+        elapsed_ms = (time.perf_counter() - timing["tool_called"]) * 1000
+        log.info("[%s] 툴 호출 -> LLM 답변 생성: %.0f ms", session_id, elapsed_ms)
+        timing["tool_called"] = None
 
     async for raw in upstream:
         event = json.loads(raw)
@@ -586,23 +605,48 @@ async def _pump_upstream(upstream, client_ws: WebSocket, state: dict) -> None:
             awaiting_continuation = False
 
         elif etype == "response.output_audio.delta":
+            _mark_answer_started()
             await client_ws.send_json({"type": "audio", "audio": event["delta"]})
 
         elif etype == "response.output_audio_transcript.delta":
+            _mark_answer_started()
+            delta = event.get("delta", "")
+            agent_text_parts.append(delta)
             await client_ws.send_json({
-                "type": "transcript", "role": "agent", "delta": event.get("delta", ""),
+                "type": "transcript", "role": "agent", "delta": delta,
             })
 
         elif etype == "conversation.item.input_audio_transcription.completed":
+            timing["voice_in"] = time.perf_counter()
+            transcript = event.get("transcript", "")
+            log.info("\n[%s] 어르신: %s", session_id, transcript)  # 앞 줄바꿈으로 이전 턴과 구분
             await client_ws.send_json({
-                "type": "transcript", "role": "elder", "text": event.get("transcript", ""),
+                "type": "transcript", "role": "elder", "text": transcript,
             })
 
         elif etype == "response.function_call_arguments.done":
+            t_selected = time.perf_counter()
             name = event["name"]
             call_id = event["call_id"]
             args = json.loads(event.get("arguments") or "{}")
+
+            if timing["voice_in"] is not None:
+                log.info(
+                    "[%s] 음성 들어감 -> 툴 선정(%s): %.0f ms",
+                    session_id, name, (t_selected - timing["voice_in"]) * 1000,
+                )
+
+            t_called = time.perf_counter()
+            log.info(
+                "[%s] 툴 선정 -> 툴 호출(%s): %.1f ms",
+                session_id, name, (t_called - t_selected) * 1000,
+            )
+
             result = run_tool(state, name, args)
+            log.info(
+                "[%s] 툴 실행 소요(%s): %.1f ms",
+                session_id, name, (time.perf_counter() - t_called) * 1000,
+            )
 
             await upstream.send(json.dumps({
                 "type": "conversation.item.create",
@@ -616,8 +660,10 @@ async def _pump_upstream(upstream, client_ws: WebSocket, state: dict) -> None:
             # checkin_start만 예외: 여기서 response.create를 또 걸면 모델이 인사와 첫
             # 본 질문을 한 응답 안에 이어붙여 말해버린다(실제로 겪은 문제). 이 턴은 그냥
             # 끝내고 turn_done을 보내, 어르신이 실제로 뭐라고 답한 다음에야 첫 질문이
-            # 나가게 만든다.
+            # 나가게 만든다. response.create를 안 거니 뒤이은 답변 생성도 없어 여기서는
+            # "툴 호출 -> 답변 생성" 구간을 재지 않는다.
             if name != "checkin_start":
+                timing["tool_called"] = t_called
                 await upstream.send(json.dumps({"type": "response.create"}))
                 awaiting_continuation = True  # 방금 response.create를 새로 걸었다
 
@@ -628,6 +674,9 @@ async def _pump_upstream(upstream, client_ws: WebSocket, state: dict) -> None:
         elif etype == "response.done":
             if awaiting_continuation:
                 continue  # 곧 이어지는 응답이 있다 — 아직 클라이언트에 turn_done을 보낼 때가 아니다
+            if agent_text_parts:  # 이 턴에서 실제로 뭔가 말했으면 한 줄로 모아서 찍는다
+                log.info("[%s] 에이전트: %s", session_id, "".join(agent_text_parts))
+                agent_text_parts.clear()
             await client_ws.send_json({"type": "turn_done"})  # 다음 발화용 새 말풍선을 열라는 신호
             if ending:
                 await client_ws.send_json({"type": "call_ended"})
@@ -679,7 +728,7 @@ async def call_ws(client_ws: WebSocket) -> None:
 
             await client_ws.send_json({"type": "ready"})
 
-            upstream_task = asyncio.create_task(_pump_upstream(upstream, client_ws, state))
+            upstream_task = asyncio.create_task(_pump_upstream(upstream, client_ws, state, session_id))
             downstream_task = asyncio.create_task(_pump_downstream(client_ws, upstream))
 
             done, pending = await asyncio.wait(
@@ -708,7 +757,7 @@ async def call_ws(client_ws: WebSocket) -> None:
         log.info("call ended: %s", session_id)
 
 
-# 주변이 시끄러울 때 테스트용........;;
+'''
 @app.post("/tts")
 async def tts_endpoint(request: Request) -> Response:
     """index2.html용 텍스트 -> 음성 변환. 입력한 문장을 mp3로 돌려주면, 브라우저가
@@ -728,7 +777,7 @@ async def tts_endpoint(request: Request) -> Response:
         return Response(content=str(exc), status_code=502, media_type="text/plain")
 
     return Response(content=audio, media_type="audio/mpeg")
-
+'''
 
 # Serve static/index.html at / (and index2.html at /index2.html) — mounted
 # last so /ws/call and /tts win the route match first.
