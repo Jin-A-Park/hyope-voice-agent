@@ -7,6 +7,7 @@ import os
 import time
 from pathlib import Path
 
+import requests
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -19,6 +20,12 @@ GUARDIAN_ALERTS_FILE = Path("alerts/inbox.jsonl")
 PROCESSED_FILE = Path("alerts/processed.txt")
 OUTBOX = Path("guardian_outbox")
 POLL_SECONDS = 2
+
+# server.py가 통화 종료 시 여기 한 줄씩 남긴다(GUARDIAN_ALERTS_FILE과 같은 내구성 패턴) —
+# 실제 Spring 전송과 채점 모델 호출은 이 파일을 폴링하며 여기서 처리한다.
+CALL_RESULT_OUTBOX = Path("call_results_outbox.jsonl")
+CALL_RESULT_PROCESSED_FILE = Path("call_results_processed.txt")
+SPRING_BASE_URL = os.environ.get("SPRING_BASE_URL", "http://localhost:8080")
 
 GUARDIAN_EMAIL = os.environ.get("GUARDIAN_EMAIL", "guardian@example.com")
 
@@ -107,6 +114,96 @@ def process_once() -> int:
             handled += 1
         except Exception:
             log.exception("failed on %s — will retry next poll", alert["id"])
+    handled += process_call_results_once()
+    return handled
+
+
+# --------------------------------------------------------------------------
+# call_results_outbox -> Spring POST /internal/call-results (X-API-KEY 인증)
+# --------------------------------------------------------------------------
+
+
+def compute_assessment(call_log_entries: list, logic_data: dict, emergencies: list) -> tuple[dict, list]:
+    """실제 채점 모델 연동 전 스텁.
+
+    별도 채점 모델이 call_log_entries/logic_data를 보고 depression_score 등 정규화된
+    점수와 adherence_records를 내는 게 최종 그림인데, 그 모델은 이번 작업 범위 밖이라
+    지금은 파이프라인(아웃박스 -> Spring 전송)을 끝까지 테스트할 수 있게 placeholder만
+    반환한다. 진짜 값이 아니므로 risk_level/summary에 명확히 표시해서 실수로 진짜 값처럼
+    쓰이지 않게 한다.
+    """
+    log.warning("compute_assessment: 채점 모델 미연동 — placeholder 값을 반환합니다")
+    assessment = {
+        "measured_at": None,
+        "depression_score": 0.5,
+        "emotional_stability": 0.5,
+        "health_risk": 0.5,
+        "cognitive_score": 0.5,
+        "overall_risk": 0.5,
+        "risk_level": "LOW",
+        "summary": "채점 모델 미연동 — placeholder 값입니다.",
+        "recommendation": "채점 모델 연동 후 재확인 필요.",
+    }
+    adherence_records: list = []
+    return assessment, adherence_records
+
+
+def load_call_result_processed() -> set[str]:
+    if CALL_RESULT_PROCESSED_FILE.exists():
+        return set(CALL_RESULT_PROCESSED_FILE.read_text().split())
+    return set()
+
+
+def mark_call_result_processed(entry_id: str) -> None:
+    with CALL_RESULT_PROCESSED_FILE.open("a") as f:
+        f.write(entry_id + "\n")
+
+
+def pending_call_results() -> list[dict]:
+    if not CALL_RESULT_OUTBOX.exists():
+        return []
+    processed = load_call_result_processed()
+    entries = []
+    for line in CALL_RESULT_OUTBOX.read_text().splitlines():
+        if not line.strip():
+            continue
+        entry = json.loads(line)
+        if entry["id"] not in processed:
+            entries.append(entry)
+    return entries
+
+
+def push_call_result(entry: dict) -> None:
+    assessment, adherence_records = compute_assessment(
+        entry["call_log_entries"], entry["logic_data"], entry["emergencies"],
+    )
+    payload = {
+        "recipient_id": entry["recipient_id"],
+        "call_log": entry["call_log"],
+        "call_log_entries": entry["call_log_entries"],
+        "assessment": assessment,
+        "adherence_records": adherence_records,
+        "profile_updates": entry["profile_updates"],  # Spring 원본 스펙엔 없는 확장 필드 — 조율 필요
+    }
+    resp = requests.post(
+        f"{SPRING_BASE_URL}/internal/call-results",
+        json=payload,
+        headers={"X-API-KEY": os.environ.get("INTERNAL_API_KEY", "")},
+        timeout=10.0,
+    )
+    resp.raise_for_status()
+
+
+def process_call_results_once() -> int:
+    handled = 0
+    for entry in pending_call_results():
+        log.info("new call result: %s (recipient_id=%s)", entry["id"], entry["recipient_id"])
+        try:
+            push_call_result(entry)
+            mark_call_result_processed(entry["id"])   # ledger advances ONLY on success
+            handled += 1
+        except Exception:
+            log.exception("failed to push call result %s — will retry next poll", entry["id"])
     return handled
 
 
@@ -117,10 +214,10 @@ def main() -> None:
 
     if args.once:
         n = process_once()
-        log.info("done: %d alert(s) processed", n)
+        log.info("done: %d item(s) processed", n)
         return
 
-    log.info("watching %s (Ctrl-C to stop)", GUARDIAN_ALERTS_FILE)
+    log.info("watching %s and %s (Ctrl-C to stop)", GUARDIAN_ALERTS_FILE, CALL_RESULT_OUTBOX)
     while True:
         process_once()
         time.sleep(POLL_SECONDS)
