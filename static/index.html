@@ -2,12 +2,12 @@
 <!--
   어르신 안부전화 — the browser side.
 
-    * "시작하기"는 /ws/browser 웹소켓을 열고, 그 순간부터 마이크가 계속 열려
+      "시작하기"는 /ws/browser 웹소켓을 열고, 그 순간부터 마이크가 계속 열려
       있는 실시간 통화다 (버튼을 누르고 있을 필요 없음 — server_vad가
       알아서 말이 끝난 시점을 판단한다).
-    * 에이전트가 tool을 호출할 때마다 칩으로 표시하고, end_call이 오면
+      에이전트가 tool을 호출할 때마다 칩으로 표시하고, end_call이 오면
       (call_ended) 통화를 스스로 정리하고 "시작하기"로 되돌아간다.
-    * 헤드폰 없이 스피커로 들으면 마이크가 에이전트 목소리를 다시 주워
+      헤드폰 없이 스피커로 들으면 마이크가 에이전트 목소리를 다시 주워
       담을 수 있다 — 데모 환경에서는 헤드폰 사용을 권장.
 -->
 <html lang="ko">
@@ -72,7 +72,7 @@
   <div id="status">Loading…</div>
 
   <select id="model">
-    <option value="">xAI (grok-voice-think-fast-1.0, 기본값)</option>
+    <option value="">xAI (grok-voice-think-fast-2.0, 기본값)</option>
     <option value="gemini-3.1-flash-live-preview">Gemini Live (gemini-3.1-flash-live-preview)</option>
   </select>
 

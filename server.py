@@ -39,10 +39,9 @@ def require_env(name: str) -> str:
         )
     return value
 
-
 def realtime_url(model: str | None = None) -> str:
     base = os.environ.get("XAI_REALTIME_BASE_URL", "wss://api.x.ai/v1/realtime")
-    model = model or os.environ.get("REALTIME_MODEL", "grok-voice-latest")
+    model = model or os.environ.get("REALTIME_MODEL", "grok-voice-think-fast-2.0")
     return f"{base}?model={model}"
 
 """Spring 문서 기준 서버 간 인증 헤더는 X-API-KEY."""
@@ -99,8 +98,9 @@ def public_base_url() -> str:
 # 배포를 전제로 한 인메모리 저장(다른 상태 저장과 동일한 방식).
 PENDING_CALL_METADATA: dict[str, dict] = {}
 
-"""_pump_upstream(XAI -> 서버) 출력 어댑터 인터페이스. BrowserSink와 CallSink가 상속받아 사용"""
+
 class OutputSink:
+    """_pump_upstream(XAI -> 서버) 출력 어댑터 인터페이스. BrowserSink와 CallSink가 상속받아 사용"""
 
     async def send_audio(self, b64_pcm16_24k: str) -> None:
         raise NotImplementedError
@@ -108,8 +108,8 @@ class OutputSink:
     async def send_event(self, payload: dict) -> None:
         raise NotImplementedError
 
-"""/ws/browser — PCM16 24kHz(브라우저 데모) 전달"""
 class BrowserSink(OutputSink):
+    """/ws/browser — PCM16 24kHz(브라우저 데모) 전달"""
 
     def __init__(self, client_ws: WebSocket):
         self._ws = client_ws
@@ -120,8 +120,8 @@ class BrowserSink(OutputSink):
     async def send_event(self, payload: dict) -> None:
         await self._ws.send_json(payload)
 
-"""/ws/claw-stream — PCM16 24kHz -> μ-law 8kHz(통화 스트림) 변환"""
 class CallSink(OutputSink):
+    """/ws/claw-stream — PCM16 24kHz -> μ-law 8kHz(통화 스트림) 변환"""
 
     def __init__(self, client_ws: WebSocket):
         self._ws = client_ws
