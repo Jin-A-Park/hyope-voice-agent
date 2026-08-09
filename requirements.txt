@@ -1,6 +1,5 @@
 fastapi
 uvicorn[standard]
-openai          # worker.py's email drafting (chat completions via the OpenAI SDK)
 python-dotenv
 websockets      # server.py's realtime voice proxy (wss://api.x.ai/v1/realtime)
 requests        # worker.py's POST to Spring (/internal/call-results)

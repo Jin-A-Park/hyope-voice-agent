@@ -4,8 +4,10 @@ import asyncio
 import json
 import logging
 import os
+import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import websockets
@@ -17,7 +19,7 @@ from fastapi import (
 from fastapi.staticfiles import StaticFiles
 
 from agent import brain
-from loader import gemini_loader
+from loader import gemini_loader, worker
 from loader.sinks import OutputSink, BrowserSink, CallSink, call_media_to_pcm24k
 
 
@@ -31,7 +33,15 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("dispatcher")
 
-app = FastAPI(title="HYOPE AI voice agent")
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    # worker.py의 폴링 루프(runtime/ 알림·통화결과 파일 -> Spring)를 같은 프로세스의 백그라운드
+    # 스레드로 돌린다 — Railway에 별도 서비스로 올리면 컨테이너가 갈려서 runtime/ 파일을
+    # 서로 못 보게 된다. 같은 프로세스에 두면 파일시스템이 자동으로 공유된다.
+    threading.Thread(target=worker.run_forever, daemon=True).start()
+    yield
+
+app = FastAPI(title="HYOPE AI voice agent", lifespan=_lifespan)
 
 def require_env(name: str) -> str:
     # * 환경변수 받아오기

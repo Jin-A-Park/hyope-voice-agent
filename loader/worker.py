@@ -9,7 +9,6 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
-from openai import OpenAI
 
 load_dotenv()
 
@@ -21,7 +20,6 @@ RUNTIME_DIR = ROOT / "runtime" # brain.py가 쓰는 append 로그/원장류 임�
 
 GUARDIAN_ALERTS_FILE = RUNTIME_DIR / "alerts" / "inbox.jsonl"
 PROCESSED_FILE = RUNTIME_DIR / "alerts" / "processed.txt"
-OUTBOX = RUNTIME_DIR / "guardian_outbox"
 POLL_SECONDS = 2
 
 # server.py가 통화 종료 시 여기 한 줄씩 남긴다(GUARDIAN_ALERTS_FILE과 같은 내구성 패턴) —
@@ -30,54 +28,24 @@ CALL_RESULT_OUTBOX = RUNTIME_DIR / "call_results" / "outbox.jsonl"
 CALL_RESULT_PROCESSED_FILE = RUNTIME_DIR / "call_results" / "processed.txt"
 SPRING_BASE_URL = os.environ.get("SPRING_BASE_URL", "http://localhost:8080")
 
-GUARDIAN_EMAIL = os.environ.get("GUARDIAN_EMAIL", "guardian@example.com")
 
-DRAFTER_PROMPT = (
-    "당신은 어르신 안부전화 서비스에서, 통화가 위급 상황으로 조기 종료됐을 때 "
-    "보호자에게 보낼 알림 이메일을 작성합니다. 알림 JSON(간단한 요약과 카테고리별 "
-    "판단·이유·권고사항이 담긴 logic_data)을 받아서, 무슨 일이 있었는지, 어떤 항목이 "
-    "왜 우려되는지, 무엇을 권장하는지를 차분하지만 진지한 톤으로 명확하게 설명하는 "
-    "이메일 본문을 작성하세요. 평문만 사용하고, 제목 줄이나 자리표시자는 넣지 마세요. "
-    "서명은 '어르신 안부전화 서비스 (자동발송)'로 하세요."
-)
-
-
-def draft_email(alert: dict) -> str:
-    """LLM-as-function — alert JSON in, email body out.
-
-    The worker gets its own model and its own prompt (Slide 22, "two brains"):
-    the voice path converses; this one produces an artifact, with zero latency
-    pressure — which is why WORKER_MODEL may be a smaller, cheaper model.
-    """
-    client = OpenAI(
-        base_url=os.environ.get("XAI_BASE_URL", "https://api.x.ai/v1"),
-        api_key=os.environ["XAI_API_KEY"],
+def push_guardian_alert(alert: dict) -> None:
+    # high-severity 알림을 Spring에 구조화된 데이터로 넘긴다 — 문구 작성/실제 발송(이메일·SMS·푸시)과
+    # 보호자 연락처는 그 정보를 이미 갖고 있는 Spring이 처리한다(push_call_result와 동일한 패턴).
+    payload = {
+        "recipient_id": (alert.get("metadata") or {}).get("recipient_id"),
+        "signal": alert["alert"],
+        "severity": "high",
+        "logic_data": alert["logic_data"],
+        "filed_at": alert["filed_at"],
+    }
+    resp = requests.post(
+        f"{SPRING_BASE_URL}/internal/emergency-alerts",
+        json=payload,
+        headers={"X-API-KEY": os.environ.get("INTERNAL_API_KEY", "")},
+        timeout=10.0,
     )
-    chat = client.chat.completions.create(
-        model=os.environ.get("WORKER_MODEL") or os.environ.get("CHAT_MODEL", "grok-4"),
-        messages=[
-            {"role": "system", "content": DRAFTER_PROMPT},
-            {"role": "user", "content": json.dumps(alert, ensure_ascii=False)},
-        ],
-    )
-    body = chat.choices[0].message.content
-    if not body:
-        raise RuntimeError("empty draft from model")
-    return body
-
-
-def send_email(alert: dict, body: str) -> Path:
-    OUTBOX.mkdir(parents=True, exist_ok=True)
-    subject = f"[긴급] 어르신 안부전화 조기종료 안내 — {alert['id']}"
-    path = OUTBOX / f"{alert['id']}.eml"
-    path.write_text(
-        f"To: {GUARDIAN_EMAIL}\n"
-        f"From: dispatch@elder-checkin.example\n"
-        f"Subject: {subject}\n\n"
-        f"{body}\n"
-    )
-    log.info("EMAIL SENT -> %s (%s)", path, subject)
-    return path
+    resp.raise_for_status()
 
 
 def load_processed() -> set[str]:
@@ -111,8 +79,7 @@ def process_once() -> int:
     for alert in pending_alerts():
         log.info("new guardian alert: %s (%s)", alert["id"], alert["alert"])
         try:
-            body = draft_email(alert)
-            send_email(alert, body)
+            push_guardian_alert(alert)
             mark_processed(alert["id"])   # ledger advances ONLY on success
             handled += 1
         except Exception:
@@ -211,6 +178,15 @@ def process_call_results_once() -> int:
     return handled
 
 
+def run_forever() -> None:
+    # server.py가 백그라운드 스레드로 이걸 직접 호출한다(같은 프로세스 = 같은 파일시스템이라
+    # runtime/ 아래 파일을 server.py와 그대로 공유) — CLI로 별도 실행할 때는 main()이 이걸 부른다.
+    log.info("watching %s and %s (Ctrl-C to stop)", GUARDIAN_ALERTS_FILE, CALL_RESULT_OUTBOX)
+    while True:
+        process_once()
+        time.sleep(POLL_SECONDS)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Guardian alert worker")
     parser.add_argument("--once", action="store_true", help="drain the backlog and exit")
@@ -221,10 +197,7 @@ def main() -> None:
         log.info("done: %d item(s) processed", n)
         return
 
-    log.info("watching %s and %s (Ctrl-C to stop)", GUARDIAN_ALERTS_FILE, CALL_RESULT_OUTBOX)
-    while True:
-        process_once()
-        time.sleep(POLL_SECONDS)
+    run_forever()
 
 
 if __name__ == "__main__":

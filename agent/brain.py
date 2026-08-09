@@ -210,7 +210,7 @@ def build_tools(question_bank: dict) -> list[dict]:
     {
         "type": "function",
         "name": "flag_emergency",
-        "description": "낙상, 자해, 급성 통증, 도움 요청 등 응급 상황을 암시하는 명시적 또는 암묵적 신호가 감지되면 즉시 호출하십시오. 확신이 없어도 의심되는 즉시 호출하는 것을 우선하십시오.",
+        "description": "낙상, 자해, 급성 통증, 도움 요청 등 응급 상황을 암시하는 명시적 또는 암묵적 신호가 감지되면 즉시 호출하십시오. 확신이 없어도 의심되는 즉시 호출하는 것을 우선하십시오. severity=high는 즉시 보호자에게 알림이 가고, medium/low는 보호자 알림 없이 호출 결과에 담긴 도움 받을 곳 정보를 그 자리에서 어르신께 자연스럽게 안내해야 합니다.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -220,7 +220,9 @@ def build_tools(question_bank: dict) -> list[dict]:
             },
             "severity": {
                 "type": "string",
-                "enum": ["low", "medium", "high"]
+                "enum": ["low", "medium", "high"],
+                "description": "high: 즉각적인 위험(낙상 직후, 의식 저하, 심한 자해/자살 신호 등) — 보호자 즉시 알림. "
+                               "medium/low: 우려되지만 즉각적 위험은 아님 — 통화 중 도움 받을 곳만 안내."
             }
             },
             "required": ["signal", "severity"]
@@ -490,9 +492,9 @@ def _help_resource_for(state: dict, signal: str) -> list[dict]:
     return HELP_RESOURCES.get(category, HELP_RESOURCES["default"])
 
 def flag_emergency(state: dict, signal: str, severity: str) -> str:
-    # * 낙상/자해 등 위험 신호를 기록한다. severity로 다음 행동이 갈린다 — high는 end_call에서
-    # * 보호자 알림으로 이어지고(여기선 안내만), medium/low는 보호자 알림 없이 통화 중 바로
-    # * 어르신께 도움 받을 곳을 안내하게 한다.
+    # * 낙상/자해 등 위험 신호를 기록한다. severity로 다음 행동이 갈린다 — high는 감지된 그
+    # * 즉시(통화가 언제 끝나는지와 무관하게) 보호자 알림 파일에 기록하고, medium/low는
+    # * 보호자 알림 없이 통화 중 바로 어르신께 도움 받을 곳을 안내하게 한다.
     state["emergencies"].append({
         "signal": signal,
         "severity": severity,
@@ -500,6 +502,17 @@ def flag_emergency(state: dict, signal: str, severity: str) -> str:
     })
 
     if severity == "high":
+        # end_call까지 기다리면 모델이 남은 질문을 계속 진행하는 동안 보호자 알림이 몇 분씩
+        # 늦어질 수 있다 — 통화 종료 여부와 상관없이 감지 즉시 기록한다.
+        GUARDIAN_ALERTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(GUARDIAN_ALERTS_FILE, "a") as f:
+            f.write(json.dumps({
+                "id": new_alert_id(),
+                "alert": signal,
+                "logic_data": state["logic_data"],
+                "metadata": state.get("_metadata") or {},  # recipient_id/phone_number from POST /call
+                "filed_at": time.time(),
+            }, ensure_ascii=False) + "\n")
         next_step = "보호자에게 알리는 절차가 진행됩니다. 침착하게 어르신을 안심시키는 말을 건네세요."
     else:
         resources = _help_resource_for(state, signal)
@@ -526,8 +539,7 @@ def update_recipient_profile(
     return json.dumps({"ok": True}, ensure_ascii=False)
 
 def new_alert_id() -> str:
-    # TODO 위급_조기종료면 보호자 알림을 파일로 남긴다(실제 서버로 전송해야함).
-    #A-1000, A-1001, ... — numbered by how many alerts are already filed."""
+    # A-1000, A-1001, ... — numbered by how many alerts are already filed.
 
     count = 0
     if GUARDIAN_ALERTS_FILE.exists():
@@ -535,21 +547,12 @@ def new_alert_id() -> str:
     return f"A-{1000 + count}"
 
 def end_call(state: dict) -> str:
-    # * 통화 종료
+    # * 통화 종료 — 보호자 알림 파일 기록은 flag_emergency(severity=high)가 감지 즉시 이미
+    # * 처리했으므로, 여기서는 통화 요약용 reason만 분류한다(중복 기록 방지).
 
     emergencies = state["emergencies"]
-    reason = "위급_조기종료" if emergencies else "정상_종료"
-
-    if emergencies:
-        GUARDIAN_ALERTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(GUARDIAN_ALERTS_FILE, "a") as f:
-            f.write(json.dumps({
-                "id": new_alert_id(),
-                "alert": " / ".join(e["signal"] for e in emergencies),
-                "logic_data": state["logic_data"],
-                "metadata": state.get("_metadata") or {},  # recipient_id/phone_number from POST /call
-                "filed_at": time.time(),
-            }, ensure_ascii=False) + "\n")
+    high_emergencies = [e for e in emergencies if e["severity"] == "high"]
+    reason = "위급_조기종료" if high_emergencies else "정상_종료"
 
     return json.dumps({
         "call_ended": True,
