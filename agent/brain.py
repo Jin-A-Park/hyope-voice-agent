@@ -1,10 +1,11 @@
 
 # * 프롬프트, 질문은행, 툴 구현, 통화 state.
 # * 데이터를 가지고 "무엇을 물어보고, 어떻게 판단하고, 통화 결과를 어떤 모양으로 남길지"만 다룬다
-# ! 네트워킹(FastAPI, WebSocket, HTTP 클라이언트), 데이터 주고받기 x
+# ! 네트워킹(FastAPI, WebSocket, HTTP 클라이언트) & 데이터 주고받기 x
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import random
@@ -254,7 +255,7 @@ def build_tools(question_bank: dict) -> list[dict]:
 
 def _find_question(questions: dict, item_id: str) -> str | None:
     # * id로 질문 조회(예: pending_retry 질문 받아오거나, 질문 순서 제약 걸려있을 때 어떤 질문인지 알고싶을 때)
-    
+
     for block in questions.values():
         for item in block["items"]:
             if item["id"] == item_id:
@@ -285,26 +286,10 @@ def build_question_bank_text(questions: dict) -> str:
         lines.append("")
     return "\n".join(lines)
 
-_KOREAN_WEEKDAYS = ["월", "화", "수", "목", "금", "토", "일"]
-
-def current_date_context() -> str:
-    # * 실제 날짜 정답
-    
-    now = datetime.now(ZoneInfo("Asia/Seoul"))
-    weekday = _KOREAN_WEEKDAYS[now.weekday()]
-    return (
-        f"오늘은 {now.year}년 {now.month}월 {now.day}일 {weekday}요일입니다(한국 시간 기준). "
-        "지남력 관련 질문(오늘 요일/몇 월/올해 몇 년도)의 답을 판단할 때는 반드시 이 날짜를 "
-        "기준으로 정확하게 비교하세요. 정답을 어르신에게 절대로 노출하지 마세요."
-    )
-
 def build_full_instructions(question_bank: dict) -> str:
-    # * 최종 instruction(프롬프트 + 날짜 정답 + 질문 텍스트 한 번에 합치기)
+    # * 최종 instruction(프롬프트 + 질문 텍스트)
 
-    return (
-        SYSTEM_PROMPT + "\n\n" + current_date_context() + "\n\n"
-        + build_question_bank_text(question_bank["questions"])
-    )
+    return SYSTEM_PROMPT + "\n\n" + build_question_bank_text(question_bank["questions"])
 
 # --------------------------------------------------------------------------
 # 툴 실행
@@ -325,10 +310,36 @@ def _gap_satisfied(state: dict, item: dict) -> bool:
     gap = len(order) - order.index(req["item"]) - 1
     return gap >= req["min_gap_questions"]
 
+_KOREAN_WEEKDAYS = ["월", "화", "수", "목", "금", "토", "일"]  # 지남력 채점(log_answer_analysis)에서 씀
+
+def _score_orientation_answer(state: dict, question_id: str) -> str | None:
+    # 지남력 문항(sis_day/month/year)은 모델에게 정답을 준 적이 없으니 모델이 낸 assessment를
+    # 믿지 않고, 서버가 방금 어르신이 한 말(call_log_entries 마지막 항목)을 실제 날짜와 직접
+    # 대조해서 assessment를 대신 계산한다.
+    if question_id not in ("sis_day", "sis_month", "sis_year"):
+        return None
+    if not state["call_log_entries"]:
+        return None
+
+    answer_text = state["call_log_entries"][-1]["answer"]
+    now = datetime.now(ZoneInfo("Asia/Seoul"))
+    if question_id == "sis_day":
+        correct = _KOREAN_WEEKDAYS[now.weekday()] in answer_text
+    elif question_id == "sis_month":
+        correct = f"{now.month}월" in answer_text
+    else:
+        correct = str(now.year) in answer_text
+    return "양호" if correct else "우려"
+
 def log_answer_analysis(state: dict, category: str, question_id: str, assessment: str, reason: str) -> str:
     # * 답변 판정을 기록하고, 그 카테고리에서 다음에 뭘 물어야 할지(next_step)를 계산해 돌려준다.
 
     category_items = state["_question_bank"]["category_items"]
+
+    override = _score_orientation_answer(state, question_id)
+    if override is not None:
+        assessment = override
+        reason = f"(서버가 실제 날짜와 대조) {reason}"
 
     state["logic_data"][category] = {"judgment": assessment, "reason": reason}
     state["asked_order"].append(question_id)
@@ -338,6 +349,15 @@ def log_answer_analysis(state: dict, category: str, question_id: str, assessment
         p for p in state["pending_retry"]
         if not (p["category"] == category and p["question_id"] == question_id)
     ]
+
+    # sis_recall처럼 방금 로그된 질문을 전제(requires)로 하는 문항은, gap이 우연히 같은
+    # 카테고리 안에서 채워지길 기다리지 않고 바로 pending_retry에 넣어 통화 막판 재시도 때
+    # 확실히 다뤄지게 한다 — 매번 지연 방식이 결정적이라 로직이 단순해진다.
+    already_queued = {(p["category"], p["question_id"]) for p in state["pending_retry"]}
+    for dependent in category_items.get(category, []):
+        req = dependent.get("requires")
+        if req and req["item"] == question_id and (category, dependent["id"]) not in already_queued:
+            state["pending_retry"].append({"category": category, "question_id": dependent["id"]})
 
     asked = state["asked_questions"].setdefault(category, set())
     asked.add(question_id)
@@ -364,12 +384,6 @@ def log_answer_analysis(state: dict, category: str, question_id: str, assessment
 
     if assessment == "알수없음":
         state["pending_retry"].append({"category": category, "question_id": question_id})
-
-    # 카테고리가 지금 닫혀도, 아직 안 물어본 gap-conditional 항목(sis_recall 등)은 pending_retry에 담아 끝에 다시 묻는다.
-    already_queued = {(p["category"], p["question_id"]) for p in state["pending_retry"]}
-    for item in category_items.get(category, []):
-        if item["id"] not in asked and item.get("requires") and (category, item["id"]) not in already_queued:
-            state["pending_retry"].append({"category": category, "question_id": item["id"]})
 
     state["completed_categories"].add(category)
     all_categories = state["_question_bank"]["categories"]
