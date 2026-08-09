@@ -55,6 +55,8 @@ def new_call_state(question_bank: dict) -> dict:
         "profile_updates": [],    # [{"action","kind","text"|"hobby_name"|"event_id","reason"}, ...] — filled by
                                    # update_recipient_profile, pushed to Spring at call end, next-call-only
         "call_log_entries": [],   # [{"sequence","question","answer","asked_at"}, ...] for Spring's call_log_entries
+        "_last_logged_entry_count": 0,  # log_answer_analysis 호출 시점의 call_log_entries 길이 — 그 사이
+                                         # 어르신의 실제 새 발화 없이 또 호출되면(답을 지어낸 것) 거부하는 데 씀
         "_last_agent_utterance": None,     # 직전 턴에 에이전트가 실제로 말한 문장 — 다음 어르신 답변과 페어링
         "_last_agent_utterance_at": None,  # 위 발화가 시작된 시각(ISO, tz 없음) — asked_at으로 씀
         "_call_started_at": None,  # browser_ws/call_stream_ws가 세션 열 때 채움 — call_log.started_at
@@ -66,6 +68,9 @@ def new_call_state(question_bank: dict) -> dict:
 
 BASE_QUESTIONS: dict = json.loads((ROOT / "static" / "questions.json").read_text())
 JUDGMENTS: list[str] = ["양호", "우려", "알수없음", "위급"]
+
+# flag_emergency(severity=medium/low)에서 Spring이 nearby_resource를 안 준 경우의 정적 폴백.
+HELP_RESOURCES: dict = json.loads((ROOT / "static" / "help_resources.json").read_text())
 
 def _profile_to_block(profile: dict) -> dict:
     # * 메인 서버에서 받아온 어르신 히스토리를 임상 카테고리 포맷으로 변환
@@ -107,19 +112,32 @@ def build_question_bank(profile: dict | None) -> dict:
     if block["items"]:
         questions = {"recipient_profile": block, **questions}
 
+    # BASE_QUESTIONS는 모듈 전역이라 공유됨 — items를 직접 shuffle하면 다른 통화에도 영향을
+    # 주니, 통화마다 새 리스트로 복사하면서 섞는다. 안 그러면 첫 질문이 매번 questions.json
+    # 순서 그대로 고정돼서, 카테고리 안 문항 다양성이 사실상 없다.
+    questions = {
+        key: {**b, "items": random.sample(b["items"], len(b["items"]))}
+        for key, b in questions.items()
+    }
+
     categories = [b["category"] for b in questions.values()]
     category_items = {b["category"]: b["items"] for b in questions.values()}
+    category_min_questions = {b["category"]: b["instructions"]["min_questions"] for b in questions.values()}
     all_question_ids = [item["id"] for items in category_items.values() for item in items]
     event_ids = [event["id"] for event in profile.get("recent_events", [])] # 근황 정보 - 나중에 지울 때 필요
     hobby_names = list(profile.get("hobbies", [])) # 취미 - 나중에 지울 때 필요 (hobby는 id가 없어 이름 자체가 식별자)
+    nearby_resource = profile.get("nearby_resource")  # Spring이 어르신 주소로 미리 계산해 보내는
+                                                        # 가까운 복지기관 정보 — 없으면 flag_emergency가 정적 폴백을 씀
 
     return {
         "questions": questions,
         "categories": categories,
         "category_items": category_items,
+        "category_min_questions": category_min_questions,
         "all_question_ids": all_question_ids,
         "event_ids": event_ids,
         "hobby_names": hobby_names,
+        "nearby_resource": nearby_resource,
     }
 
 def build_tools(question_bank: dict) -> list[dict]:
@@ -336,6 +354,21 @@ def log_answer_analysis(state: dict, category: str, question_id: str, assessment
 
     category_items = state["_question_bank"]["category_items"]
 
+    # sis_encode 같은 안내문(type: statement)은 애초에 어르신 답변이 필요 없다(듣자마자 바로 기록).
+    asked_item = next((i for i in category_items.get(category, []) if i["id"] == question_id), None)
+    is_statement = bool(asked_item and asked_item.get("type") == "statement")
+
+    # 어르신의 실제 새 발화(call_log_entries 증가) 없이 또 호출됐다면, 모델이 답을 못 들은 채로
+    # 지어낸 것이다 — response.create가 tool 호출 직후 바로 걸리다 보니(server.py) 실제 사용자
+    # 오디오를 기다리지 않고 모델 혼자 질문+답변+다음 질문을 이어붙여 말해버리는 사고가 있었다.
+    if not is_statement and len(state["call_log_entries"]) <= state["_last_logged_entry_count"]:
+        return json.dumps({
+            "ok": False,
+            "next_step": "아직 어르신의 실제 답변을 듣지 못했습니다. log_answer_analysis를 호출하지 "
+                         "말고, 방금 질문에 대한 어르신의 답변을 기다리세요.",
+        }, ensure_ascii=False)
+    state["_last_logged_entry_count"] = len(state["call_log_entries"])
+
     override = _score_orientation_answer(state, question_id)
     if override is not None:
         assessment = override
@@ -367,13 +400,19 @@ def log_answer_analysis(state: dict, category: str, question_id: str, assessment
     ]
     random.shuffle(remaining)  # questions.json 순서대로 매번 똑같이 물어보지 않게
 
-    # sis_encode 같은 안내문(type: statement)은 good이어도 카테고리를 끝내면 안 된다 — 뒤이은 실제 문항이 스킵됨.
-    asked_item = next((i for i in category_items.get(category, []) if i["id"] == question_id), None)
-    is_statement = bool(asked_item and asked_item.get("type") == "statement")
+    # instructions.min_questions는 예전엔 프롬프트 표시용일 뿐 실제로 집행되지 않아서, 카테고리가
+    # 최소 문항 수와 상관없이 첫 질문 하나만 답하면 바로 닫혀버리는 문제가 있었다 — 여기서 집행한다.
+    min_questions = state["_question_bank"]["category_min_questions"].get(category, 1)
+    not_enough = len(asked) < min_questions
 
     # unknown은 바로 재질문하지 않고 pending_retry에 담아 한 바퀴 돈 뒤 다시 묻는다 — 헷갈림 방지.
-    if (is_statement or assessment in ("우려", "위급")) and remaining:
-        why = "방금 건 채점 대상이 아닌 안내문일 뿐" if is_statement else f"'{category}'는 아직 good이 아닙니다"
+    if (is_statement or assessment in ("우려", "위급") or not_enough) and remaining:
+        if is_statement:
+            why = "방금 건 채점 대상이 아닌 안내문일 뿐"
+        elif not_enough:
+            why = f"'{category}'는 아직 최소 {min_questions}문항을 못 채웠습니다"
+        else:
+            why = f"'{category}'는 아직 good이 아닙니다"
         return json.dumps({
             "ok": True,
             "category_status": "진행중",
@@ -433,14 +472,44 @@ def double_check(state: dict, category: str, question_id: str) -> str:
         "next_step": "같은 질문을 더 쉬운 말로 풀어서 다시 여쭤보세요.",
     }, ensure_ascii=False)
 
+def _help_resource_for(state: dict, signal: str) -> list[dict]:
+    # Spring이 profile로 미리 계산해 보낸 지역 기반 자원이 있으면 그걸 쓰고, 없으면
+    # signal 텍스트로 대충 카테고리를 짚어서 static/help_resources.json에서 폴백을 고른다.
+    nearby = state["_question_bank"].get("nearby_resource")
+    if nearby:
+        return nearby if isinstance(nearby, list) else [nearby]
+
+    if any(k in signal for k in ("학대", "폭행", "방임", "때리")):
+        category = "학대"
+    elif any(k in signal for k in ("자살", "죽고 싶", "우울", "희망이 없", "외롭")):
+        category = "정신건강"
+    elif any(k in signal for k in ("쓰러", "의식", "심장", "숨", "응급")):
+        category = "응급"
+    else:
+        category = "default"
+    return HELP_RESOURCES.get(category, HELP_RESOURCES["default"])
+
 def flag_emergency(state: dict, signal: str, severity: str) -> str:
-    # * 낙상/자해 등 위험 신호를 기록만 해둔다 — 실제 알림 파일 기록은 end_call에서 emergencies 유무로 처리.
+    # * 낙상/자해 등 위험 신호를 기록한다. severity로 다음 행동이 갈린다 — high는 end_call에서
+    # * 보호자 알림으로 이어지고(여기선 안내만), medium/low는 보호자 알림 없이 통화 중 바로
+    # * 어르신께 도움 받을 곳을 안내하게 한다.
     state["emergencies"].append({
         "signal": signal,
         "severity": severity,
         "flagged_at": time.time(),
     })
-    return json.dumps({"ok": True}, ensure_ascii=False)
+
+    if severity == "high":
+        next_step = "보호자에게 알리는 절차가 진행됩니다. 침착하게 어르신을 안심시키는 말을 건네세요."
+    else:
+        resources = _help_resource_for(state, signal)
+        resource_text = ", ".join(f"{r['name']}({r['phone']})" for r in resources)
+        next_step = (
+            "심각한 위급 상황은 아니니 보호자 알림 없이, 어르신께 이런 곳에 도움을 요청할 수 "
+            f"있다고 자연스럽게 안내하세요: {resource_text}"
+        )
+
+    return json.dumps({"ok": True, "next_step": next_step}, ensure_ascii=False)
 
 
 def update_recipient_profile(
