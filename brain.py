@@ -62,7 +62,7 @@ def new_call_state(question_bank: dict) -> dict:
         "call_log_entries": [],   # [{"sequence","question","answer","asked_at"}, ...] for Spring's call_log_entries
         "_last_agent_utterance": None,     # 직전 턴에 에이전트가 실제로 말한 문장 — 다음 어르신 답변과 페어링
         "_last_agent_utterance_at": None,  # 위 발화가 시작된 시각(ISO, tz 없음) — asked_at으로 씀
-        "_call_started_at": None,  # call_ws/claw_stream_ws가 세션 열 때 채움 — call_log.started_at
+        "_call_started_at": None,  # browser_ws/claw_stream_ws가 세션 열 때 채움 — call_log.started_at
     }
 
 
@@ -183,7 +183,7 @@ def _profile_to_block(profile: dict) -> dict:
 
 
 def _default_profile() -> dict:
-    """Spring이 profile을 안 보낸 경우(브라우저 데모 /ws/call)의 폴백.
+    """Spring이 profile을 안 보낸 경우(브라우저 데모 /ws/browser)의 폴백.
 
     static/recipient_profile.json은 실제 배포에선 어르신별로 달라지고 개인정보라
     gitignore 대상 — 로컬 데모/개발용 고정 프로필로만 쓰인다.
@@ -591,7 +591,7 @@ def write_call_result_outbox(state: dict, status: str) -> None:
 
     똑같은 내구성 패턴: 실제 POST(그리고 채점 모델 호출)는 worker.py가 폴링하며
     처리하게 빼서, Spring이 잠깐 안 받아줘도 통화 종료 경로에서 데이터를 잃지 않는다.
-    브라우저 데모(/ws/call)처럼 Spring이 트리거하지 않은 통화는 recipient_id가 없어
+    브라우저 데모(/ws/browser)처럼 Spring이 트리거하지 않은 통화는 recipient_id가 없어
     보낼 대상이 없으니 그냥 건너뛴다.
     """
     metadata = state.get("_metadata") or {}

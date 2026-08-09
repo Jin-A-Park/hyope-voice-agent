@@ -2,7 +2,7 @@
 <!--
   어르신 안부전화 — 텍스트 입력 버전.
 
-    * index.html과 같은 /ws/call 리얼타임 웹소켓을 쓰는 별도 페이지 — 다만
+    * index.html과 같은 /ws/browser 리얼타임 웹소켓을 쓰는 별도 페이지 — 다만
       마이크 대신 타이핑으로 어르신 발화를 만든다. 입력한 문장은 서버의 /tts로
       보내 실제 음성(mp3)으로 합성한 뒤, PCM16으로 디코드해서 index.html의
       마이크 입력과 똑같은 경로("audio" 메시지)로 흘려보낸다 — 그래야 서버쪽
@@ -36,6 +36,10 @@
   }
   header h1 { font-size: 1.05rem; font-weight: 600; margin: 0; }
   #status { color: var(--dim); font-size: .8rem; margin-top: .15rem; }
+  #model {
+    background: var(--panel); color: var(--text); border: 1px solid #2a2e3a;
+    border-radius: .4rem; padding: .3rem .5rem; font: inherit;
+  }
   #reset {
     background: none; border: 1px solid #3a3f4e; color: var(--dim);
     border-radius: 8px; padding: .35rem .8rem; font: 500 .8rem system-ui; cursor: pointer;
@@ -93,6 +97,10 @@
       <h1>어르신 안부전화 (텍스트)</h1>
       <div id="status">Loading…</div>
     </div>
+    <select id="model">
+      <option value="">xAI (grok-voice-think-fast-1.0, 기본값)</option>
+      <option value="gemini-3.1-flash-live-preview">Gemini Live (gemini-3.1-flash-live-preview)</option>
+    </select>
     <button id="reset" title="Clear the server's conversation memory">✕ new call</button>
   </header>
 
@@ -253,6 +261,7 @@ function showComposer() {
 function showStartButton() {
   $("composer").innerHTML = `<button id="start">시작하기</button>`;
   $("start").addEventListener("click", startSession);
+  $("model").disabled = false;
 }
 
 function setComposerEnabled(enabled) {
@@ -263,10 +272,13 @@ function setComposerEnabled(enabled) {
 
 function startSession() {
   $("start").disabled = true;
+  $("model").disabled = true;
   status("연결 중…");
 
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/ws/call`);
+  const model = $("model").value;
+  const qs = model ? `?model=${encodeURIComponent(model)}` : "";
+  ws = new WebSocket(`${proto}://${location.host}/ws/browser${qs}`);
 
   ws.onmessage = (evt) => handleServerMessage(JSON.parse(evt.data));
   ws.onerror = () => {

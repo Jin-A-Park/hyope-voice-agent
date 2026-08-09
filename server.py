@@ -20,6 +20,7 @@ from fastapi import (
 from fastapi.staticfiles import StaticFiles
 
 import brain
+import gemini_realtime
 
 load_dotenv()
 
@@ -39,11 +40,16 @@ def require_env(name: str) -> str:
     return value
 
 
-def realtime_url() -> str:
+def realtime_url(model: str | None = None) -> str:
     base = os.environ.get("XAI_REALTIME_BASE_URL", "wss://api.x.ai/v1/realtime")
-    model = os.environ.get("REALTIME_MODEL", "grok-voice-think-fast-1.0")
+    model = model or os.environ.get("REALTIME_MODEL", "grok-voice-latest")
     return f"{base}?model={model}"
 
+"""Spring 문서 기준 서버 간 인증 헤더는 X-API-KEY."""
+def check_internal_key(x_api_key: str | None) -> None:
+    expected = require_env("INTERNAL_API_KEY")
+    if x_api_key != expected:
+        raise HTTPException(status_code=401, detail="unauthorized")
 
 def turn_detection_config() -> dict:
 
@@ -57,7 +63,7 @@ def turn_detection_config() -> dict:
 
 
 # --------------------------------------------------------------------------
-# claw-ops (실제 전화망) 브릿지
+# claw-ops (실제 전화망) 브릿지. 에이전트 SDK 대신 직접 voiceML구현
 # --------------------------------------------------------------------------
 
 _claw_client: AsyncClawOps | None = None
@@ -72,18 +78,6 @@ def claw_client() -> AsyncClawOps:
         )
     return _claw_client
 
-
-def public_base_url() -> str:
-    return require_env("PUBLIC_BASE_URL").rstrip("/")
-
-
-# POST /call에서 발신 시 채워두고, /ws/claw-stream의 start 이벤트(callId)로 꺼내
-# state["_metadata"]에 심는다. HTTP 요청(/call)과 WS 접속(claw-ops가 나중에 별도로
-# 걸어옴)이 서로 다른 요청이라 callId로 이어줄 방법이 이거 말고 없다 — 단일 프로세스
-# 배포를 전제로 한 인메모리 저장(다른 상태 저장과 동일한 방식).
-PENDING_CALL_METADATA: dict[str, dict] = {}
-
-
 def verify_claw_signature(url: str, params: dict, signature: str | None) -> None:
     if not signature:
         raise HTTPException(status_code=401, detail="missing X-Signature")
@@ -95,99 +89,18 @@ def verify_claw_signature(url: str, params: dict, signature: str | None) -> None
     except WebhookVerificationError:
         raise HTTPException(status_code=401, detail="invalid signature")
 
-
-def check_internal_key(x_api_key: str | None) -> None:
-    """Spring 문서 기준 서버 간 인증 헤더는 X-API-KEY(값은 INTERNAL_API_KEY 그대로)."""
-    expected = require_env("INTERNAL_API_KEY")
-    if x_api_key != expected:
-        raise HTTPException(status_code=401, detail="unauthorized")
+def public_base_url() -> str:
+    return require_env("PUBLIC_BASE_URL").rstrip("/")
 
 
-# --- 오디오 트랜스코딩: claw-ops(G.711 μ-law, 8kHz) <-> xAI Realtime(PCM16, 24kHz) ---
-# ratecv의 state는 리샘플 연속성을 위해 방향별로 콜 스코프에서 유지해야 한다
-# (매 청크 새로 시작하면 경계마다 클릭음이 낀다) — 호출부에서 클로저 변수로 들고 있는다.
+# POST /call에서 발신 시 채워두고, /ws/claw-stream의 start 이벤트(callId)로 꺼내
+# state["_metadata"]에 심는다. HTTP 요청(/call)과 WS 접속(claw-ops가 나중에 별도로
+# 걸어옴)이 서로 다른 요청이라 callId로 이어줄 방법이 이거 말고 없다 — 단일 프로세스
+# 배포를 전제로 한 인메모리 저장(다른 상태 저장과 동일한 방식).
+PENDING_CALL_METADATA: dict[str, dict] = {}
 
-def claw_media_to_pcm24k(b64_ulaw: str, state) -> tuple[str, object]:
-    """claw-ops가 보낸 μ-law 8kHz 청크를 xAI Realtime이 기대하는 PCM16 24kHz로."""
-    ulaw = base64.b64decode(b64_ulaw)
-    pcm8k = audioop.ulaw2lin(ulaw, 2)
-    pcm24k, state = audioop.ratecv(pcm8k, 2, 1, 8000, 24000, state)
-    return base64.b64encode(pcm24k).decode("ascii"), state
-
-
-def pcm24k_to_claw_media(b64_pcm16_24k: str, state) -> tuple[str, object]:
-    """xAI Realtime의 PCM16 24kHz 델타를 claw-ops Stream이 기대하는 μ-law 8kHz로.
-
-    xAI가 보내는 델타 청크는 2바이트(1 샘플) 경계에 맞춰 끊긴다는 보장이 없다 —
-    홀수 바이트로 끊기면 ratecv/lin2ulaw가 "not a whole number of frames"로 죽는다.
-    그래서 state에 남는 마지막 1바이트를 같이 들고 있다가 다음 청크 앞에 이어붙인다
-    (버리면 그 지점에서 샘플 하나가 밀려 이후 오디오 전체가 어긋난다).
-    """
-    leftover, resample_state = state if state else (b"", None)
-    pcm24k = leftover + base64.b64decode(b64_pcm16_24k)
-    if len(pcm24k) % 2:
-        pcm24k, leftover = pcm24k[:-1], pcm24k[-1:]
-    else:
-        leftover = b""
-    pcm8k, resample_state = audioop.ratecv(pcm24k, 2, 1, 24000, 8000, resample_state)
-    ulaw = audioop.lin2ulaw(pcm8k, 2)
-    return base64.b64encode(ulaw).decode("ascii"), (leftover, resample_state)
-
-'''
-def synthesize_speech(text: str) -> bytes:
-    """xAI의 네이티브 TTS 엔드포인트(mp3 bytes 반환) — index2.html이 타이핑한 텍스트를
-
-    실제 음성으로 바꿔 /ws/call에 "말하듯" 흘려보낼 때만 쓴다. 리얼타임 통화 자체의
-    출력 음성은 이거랑 무관하게 realtime API가 직접 스트리밍한다.
-    """
-    resp = requests.post(
-        "https://api.x.ai/v1/tts",
-        headers={
-            "Authorization": f"Bearer {require_env('XAI_API_KEY')}",
-            "Content-Type": "application/json",
-        },
-        json={"text": text, "voice_id": os.environ.get("TTS_VOICE", "ara"), "language": "auto"},
-    )
-    resp.raise_for_status()
-    return resp.content
-'''
-
-
-async def _pump_downstream(client_ws: WebSocket, upstream) -> None:
-    """브라우저 -> 이 서버로 오는 메시지를 xAI realtime ws로 그대로 전달한다."""
-    while True:
-        msg = await client_ws.receive_json()
-        kind = msg.get("type")
-
-        if kind == "audio":
-            await upstream.send(json.dumps({
-                "type": "input_audio_buffer.append",
-                "audio": msg["audio"],
-            }))
-        elif kind == "text":
-            text = (msg.get("text") or "").strip()
-            if not text:
-                continue
-            await upstream.send(json.dumps({
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": text}],
-                },
-            }))
-            await upstream.send(json.dumps({"type": "response.create"}))
-        elif kind == "hangup":
-            return
-
-
-class CallSink:
-    """_pump_upstream이 내보내는 오디오/이벤트를 실제 전송 매체에 맞게 적어주는 어댑터.
-
-    타이밍 계측·툴 실행·response.create 이어가기 판단 같은 핵심 로직은 매체(브라우저
-    WS vs claw-ops Stream WS)와 무관하므로 _pump_upstream 하나만 유지하고, 매체별
-    차이(오디오 포맷, UI 전용 이벤트 처리 여부)는 이 두 메서드에만 담는다.
-    """
+"""_pump_upstream(XAI -> 서버) 출력 어댑터 인터페이스. BrowserSink와 CallSink가 상속받아 사용"""
+class OutputSink:
 
     async def send_audio(self, b64_pcm16_24k: str) -> None:
         raise NotImplementedError
@@ -195,9 +108,8 @@ class CallSink:
     async def send_event(self, payload: dict) -> None:
         raise NotImplementedError
 
-
-class BrowserSink(CallSink):
-    """/ws/call — index.html이 기대하는 그대로(PCM16 24kHz, 타입이 있는 JSON) 전달."""
+"""/ws/browser — PCM16 24kHz(브라우저 데모) 전달"""
+class BrowserSink(OutputSink):
 
     def __init__(self, client_ws: WebSocket):
         self._ws = client_ws
@@ -208,13 +120,8 @@ class BrowserSink(CallSink):
     async def send_event(self, payload: dict) -> None:
         await self._ws.send_json(payload)
 
-
-class ClawStreamSink(CallSink):
-    """/ws/claw-stream — PCM16 24kHz를 claw-ops의 μ-law 8kHz media 이벤트로 변환해서 전달.
-
-    transcript/tool_used/turn_done 같은 UI 전용 이벤트는 claw-ops 프로토콜에 대응하는
-    타입이 없으므로 그냥 버린다(호출부인 _pump_upstream이 이미 log.info로 남긴다).
-    """
+"""/ws/claw-stream — PCM16 24kHz -> μ-law 8kHz(통화 스트림) 변환"""
+class CallSink(OutputSink):
 
     def __init__(self, client_ws: WebSocket):
         self._ws = client_ws
@@ -227,14 +134,73 @@ class ClawStreamSink(CallSink):
     async def send_event(self, payload: dict) -> None:
         pass
 
+"""브라우저(/ws/browser)에서 받아온 데이터 -> 모델"""
+async def _pump_downstream(client_ws: WebSocket, upstream) -> None:
+    while True:
+        msg = await client_ws.receive_json()
+        kind = msg.get("type")
 
-async def _pump_upstream(upstream, sink: CallSink, state: dict, session_id: str) -> None:
-    """xAI realtime ws에서 오는 이벤트를 처리하고, 재생용 오디오/자막/칩을 sink로 내보낸다."""
+        if kind == "audio":
+            await upstream.send(json.dumps({
+                "type": "input_audio_buffer.append",
+                "audio": msg["audio"],
+            }))
+        elif kind == "hangup":
+            return
+
+"""통화 스트림(/ws/claw-stream)에서 받아온 데이터 -> 오디오 변환 -> 모델"""
+async def _pump_downstream_claw(client_ws: WebSocket, upstream, state: dict) -> None:
+
+    resample_state = None
+    while True:
+        event = await client_ws.receive_json()
+        etype = event.get("event")
+
+        if etype == "media":
+            b64_pcm16, resample_state = claw_media_to_pcm24k(event["media"]["payload"], resample_state)
+            await upstream.send(json.dumps({
+                "type": "input_audio_buffer.append",
+                "audio": b64_pcm16,
+            }))
+        elif etype == "dtmf":
+            log.info("claw dtmf: %s", event.get("dtmf", {}).get("digit"))
+        elif etype == "stop":
+            return
+        # connected/mark는 특별히 할 일이 없어 무시한다.
+
+""" 오디오 트랜스코딩: claw-ops(G.711 μ-law, 8kHz) -> xAI Realtime(PCM16, 24kHz) """
+def claw_media_to_pcm24k(b64_ulaw: str, state) -> tuple[str, object]:
+    """claw-ops가 보낸 μ-law 8kHz 청크를 xAI Realtime이 기대하는 PCM16 24kHz로."""
+    ulaw = base64.b64decode(b64_ulaw)
+    pcm8k = audioop.ulaw2lin(ulaw, 2)
+    pcm24k, state = audioop.ratecv(pcm8k, 2, 1, 8000, 24000, state)
+    return base64.b64encode(pcm24k).decode("ascii"), state
+
+""" 오디오 트랜스코딩: claw-ops(G.711 μ-law, 8kHz) <- xAI Realtime(PCM16, 24kHz) """
+def pcm24k_to_claw_media(b64_pcm16_24k: str, state) -> tuple[str, object]:
+    """xAI Realtime의 PCM16 24kHz 델타를 claw-ops Stream이 기대하는 μ-law 8kHz로."""
+    leftover, resample_state = state if state else (b"", None)
+    pcm24k = leftover + base64.b64decode(b64_pcm16_24k)
+    if len(pcm24k) % 2:
+        pcm24k, leftover = pcm24k[:-1], pcm24k[-1:]
+    else:
+        leftover = b""
+    pcm8k, resample_state = audioop.ratecv(pcm24k, 2, 1, 24000, 8000, resample_state)
+    ulaw = audioop.lin2ulaw(pcm8k, 2)
+    return base64.b64encode(ulaw).decode("ascii"), (leftover, resample_state)
+
+
+"""
+1. xAI realtime ws 발화 -> 서버 -> sink(브라우저 or 전화망)
+2. xAI realtime ws 이벤트 -> 서버 실행 -> 결과 다시 xAI -> 응답 재요청
+"""
+async def _pump_upstream(upstream, sink: OutputSink, state: dict, session_id: str) -> None:
+    
     ending = False
-    # 툴 호출이 있었던 응답은 response.done 이후 우리가 곧바로 response.create로
-    # 이어서 대답을 시킨다 — 그 사이에 클라이언트가 새 입력을 보내면 response.create가
-    # 겹쳐 응답이 통째로 비어버린다(실제로 겪은 버그). 그래서 "이 응답이 이어질
-    # 예정이다"를 추적해, 진짜로 할 말이 끝난 response.done에서만 turn_done을 보낸다.
+    # response.create로 대답을 시킨다 — 그 사이에 클라이언트가 
+    # 새 입력을 보내면 response.create가 겹치는 문제 발생. 
+    # 그래서 "이 응답이 이어질 예정이다"를 추적해, 
+    # 진짜로 할 말이 끝난 response.done에서만 turn_done을 보낸다.
     awaiting_continuation = False
 
     # 지연시간 계측: 구간 시작 시각만 들고 있다가, 그 구간을 끝내는 이벤트가 오면
@@ -293,7 +259,7 @@ async def _pump_upstream(upstream, sink: CallSink, state: dict, session_id: str)
             await sink.send_event({
                 "type": "transcript", "role": "elder", "text": transcript,
             })
-
+        #모델이 tool 호출
         elif etype == "response.function_call_arguments.done":
             t_selected = time.perf_counter()
             name = event["name"]
@@ -311,13 +277,14 @@ async def _pump_upstream(upstream, sink: CallSink, state: dict, session_id: str)
                 "[%s] 툴 선정 -> 툴 호출(%s): %.1f ms",
                 session_id, name, (t_called - t_selected) * 1000,
             )
-
+            # 서버가 tool 실행
             result = brain.run_tool(state, name, args)
             log.info(
                 "[%s] 툴 실행 소요(%s): %.1f ms",
                 session_id, name, (time.perf_counter() - t_called) * 1000,
             )
 
+            #결과 다시 서버 -> 모델
             await upstream.send(json.dumps({
                 "type": "conversation.item.create",
                 "item": {
@@ -362,8 +329,12 @@ async def _pump_upstream(upstream, sink: CallSink, state: dict, session_id: str)
             })
 
 
-@app.websocket("/ws/call")
-async def call_ws(client_ws: WebSocket) -> None:
+# --------------------------------------------------------------------------
+# ws endpoint
+# --------------------------------------------------------------------------
+
+@app.websocket("/ws/browser")
+async def browser_ws(client_ws: WebSocket) -> None:
     await client_ws.accept()
     session_id = f"session-{uuid.uuid4().hex[:8]}"  # 로그 상관관계용 id — 조회 용도로 쓰이진 않는다
     # 브라우저 데모엔 Spring이 실어주는 profile이 없다 — build_question_bank(None)이
@@ -371,11 +342,16 @@ async def call_ws(client_ws: WebSocket) -> None:
     question_bank = brain.build_question_bank(None)
     state = brain.new_call_state(question_bank)
     state["_call_started_at"] = brain.spring_timestamp()
-    log.info("call started: %s", session_id)
+    model = client_ws.query_params.get("model")
+    log.info("call started: %s (model=%s)", session_id, model or "(default)")
 
     try:
+        if gemini_realtime.is_gemini_model(model):
+            await gemini_realtime.run_browser_session(client_ws, state, question_bank, model, session_id)
+            return
+
         async with websockets.connect(
-            realtime_url(),
+            realtime_url(model),
             additional_headers={"Authorization": f"Bearer {require_env('XAI_API_KEY')}"},
         ) as upstream:
             await upstream.send(json.dumps({
@@ -435,35 +411,12 @@ async def call_ws(client_ws: WebSocket) -> None:
         log.info("call ended: %s", session_id)
 
 
-async def _pump_downstream_claw(client_ws: WebSocket, upstream, state: dict) -> None:
-    """claw-ops Stream이 보내는 이벤트(전화 쪽 오디오)를 xAI realtime ws로 전달한다.
-
-    start 이벤트는 claw_stream_ws가 세션을 열기 전에 이미 소비했으므로 여기선 다루지 않는다.
-    """
-    resample_state = None
-    while True:
-        event = await client_ws.receive_json()
-        etype = event.get("event")
-
-        if etype == "media":
-            b64_pcm16, resample_state = claw_media_to_pcm24k(event["media"]["payload"], resample_state)
-            await upstream.send(json.dumps({
-                "type": "input_audio_buffer.append",
-                "audio": b64_pcm16,
-            }))
-        elif etype == "dtmf":
-            log.info("claw dtmf: %s", event.get("dtmf", {}).get("digit"))
-        elif etype == "stop":
-            return
-        # connected/mark는 특별히 할 일이 없어 무시한다.
-
-
 @app.websocket("/ws/claw-stream")
 async def claw_stream_ws(client_ws: WebSocket) -> None:
-    """claw-ops VoiceML의 <Connect><Stream>이 붙는 곳 — /ws/call과 같은 구조지만
+    """claw-ops VoiceML의 <Connect><Stream>이 붙는 곳 — /ws/browser와 같은 구조지만
 
     상대가 브라우저가 아니라 claw-ops이므로 프로토콜과 오디오 포맷만 다르다
-    (BrowserSink 대신 ClawStreamSink, _pump_downstream 대신 _pump_downstream_claw).
+    (BrowserSink 대신 CallSink, _pump_downstream 대신 _pump_downstream_claw).
     """
     await client_ws.accept()
     session_id = f"claw-{uuid.uuid4().hex[:8]}"
@@ -494,50 +447,57 @@ async def claw_stream_ws(client_ws: WebSocket) -> None:
         state["_metadata"] = metadata
         state["_call_started_at"] = brain.spring_timestamp()
 
-        async with websockets.connect(
-            realtime_url(),
-            additional_headers={"Authorization": f"Bearer {require_env('XAI_API_KEY')}"},
-        ) as upstream:
-            await upstream.send(json.dumps({
-                "type": "session.update",
-                "session": {
-                    "voice": os.environ.get("TTS_VOICE", "ara"),
-                    "instructions": brain.build_full_instructions(question_bank),
-                    "turn_detection": turn_detection_config(),
-                    "input_audio_format": "pcm16",
-                    "output_audio_format": "pcm16",
-                    "tools": brain.build_tools(question_bank),
-                },
-            }))
+        model = metadata.get("model")
+        log.info("claw call %s: model=%s", session_id, model or "(default)")
 
-            await upstream.send(json.dumps({
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "message",
-                    "role": "system",
-                    "content": [{"type": "input_text", "text": brain.GREETING_PROMPT}],
-                },
-            }))
-            await upstream.send(json.dumps({"type": "response.create"}))
+        if gemini_realtime.is_gemini_model(model):
+            ok = await gemini_realtime.run_session(client_ws, state, question_bank, model, session_id)
+            status = "COMPLETED" if ok else "FAILED"
+        else:
+            async with websockets.connect(
+                realtime_url(model),
+                additional_headers={"Authorization": f"Bearer {require_env('XAI_API_KEY')}"},
+            ) as upstream:
+                await upstream.send(json.dumps({
+                    "type": "session.update",
+                    "session": {
+                        "voice": os.environ.get("TTS_VOICE", "ara"),
+                        "instructions": brain.build_full_instructions(question_bank),
+                        "turn_detection": turn_detection_config(),
+                        "input_audio_format": "pcm16",
+                        "output_audio_format": "pcm16",
+                        "tools": brain.build_tools(question_bank),
+                    },
+                }))
 
-            upstream_task = asyncio.create_task(
-                _pump_upstream(upstream, ClawStreamSink(client_ws), state, session_id)
-            )
-            downstream_task = asyncio.create_task(_pump_downstream_claw(client_ws, upstream, state))
+                await upstream.send(json.dumps({
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "message",
+                        "role": "system",
+                        "content": [{"type": "input_text", "text": brain.GREETING_PROMPT}],
+                    },
+                }))
+                await upstream.send(json.dumps({"type": "response.create"}))
 
-            done, pending = await asyncio.wait(
-                {upstream_task, downstream_task}, return_when=asyncio.FIRST_COMPLETED
-            )
-            for task in pending:
-                task.cancel()
-            had_error = False
-            for task in done:
-                exc = task.exception()
-                if exc and not isinstance(exc, (WebSocketDisconnect, asyncio.CancelledError)):
-                    log.exception("claw call %s pump failed", session_id, exc_info=exc)
-                    had_error = True
+                upstream_task = asyncio.create_task(
+                    _pump_upstream(upstream, CallSink(client_ws), state, session_id)
+                )
+                downstream_task = asyncio.create_task(_pump_downstream_claw(client_ws, upstream, state))
 
-        status = "FAILED" if had_error else "COMPLETED"
+                done, pending = await asyncio.wait(
+                    {upstream_task, downstream_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in pending:
+                    task.cancel()
+                had_error = False
+                for task in done:
+                    exc = task.exception()
+                    if exc and not isinstance(exc, (WebSocketDisconnect, asyncio.CancelledError)):
+                        log.exception("claw call %s pump failed", session_id, exc_info=exc)
+                        had_error = True
+
+            status = "FAILED" if had_error else "COMPLETED"
 
     except WebSocketDisconnect:
         log.info("claw-ops disconnected: %s", session_id)
@@ -560,7 +520,7 @@ async def claw_stream_ws(client_ws: WebSocket) -> None:
         log.info("claw call ended: %s", session_id)
 
 
-async def _place_call(recipient_id, phone_number: str, profile: dict) -> None:
+async def _place_call(recipient_id, phone_number: str, profile: dict, model: str | None) -> None:
     """실제 claw-ops 발신 — Spring이 블로킹 대기 중인 POST /call 응답과 분리하기 위해
 
     BackgroundTasks로 여기서 실행된다. 실패하면 Spring 응답은 이미 나간 뒤라 알릴 방법이
@@ -587,6 +547,7 @@ async def _place_call(recipient_id, phone_number: str, profile: dict) -> None:
         "recipient_id": recipient_id,
         "phone_number": phone_number,
         "profile": profile,
+        "model": model,
     }
 
 
@@ -599,8 +560,10 @@ async def create_call(
     """Spring이 이 서버에 대고 부르는 통화 트리거 엔드포인트.
 
     body: {"recipient_id": 1, "phone_number": "010-1234-5678",
-           "profile": {"hobbies": [...], "recent_events": [{"id","text","added_at"}, ...]}}
-    (profile은 Spring 문서 원본 스펙엔 없는 확장 필드 — Spring 팀과 별도 조율 필요.)
+           "profile": {"hobbies": [...], "recent_events": [{"id","text","added_at"}, ...]},
+           "model": "grok-voice-think-fast-1.0"}
+    (profile/model은 Spring 문서 원본 스펙엔 없는 확장 필드. model은 테스트 편의용 —
+    생략하면 REALTIME_MODEL(.env) 기본값을 쓴다. profile은 Spring 팀과 별도 조율 필요.)
 
     Spring이 이 응답을 블로킹 대기하므로 즉시 accepted를 반환하고, 실제 발신(claw-ops
     REST 호출)은 백그라운드로 미룬다.
@@ -612,7 +575,9 @@ async def create_call(
     if recipient_id is None or not phone_number:
         raise HTTPException(status_code=400, detail="'recipient_id' and 'phone_number' are required")
 
-    background_tasks.add_task(_place_call, recipient_id, phone_number, body.get("profile") or {})
+    background_tasks.add_task(
+        _place_call, recipient_id, phone_number, body.get("profile") or {}, body.get("model"),
+    )
     return {"status": "accepted"}
 
 
@@ -665,29 +630,6 @@ async def webhooks_status(request: Request, x_signature: str | None = Header(def
 
     return Response(status_code=204)
 
-
-'''
-@app.post("/tts")
-async def tts_endpoint(request: Request) -> Response:
-    """index2.html용 텍스트 -> 음성 변환. 입력한 문장을 mp3로 돌려주면, 브라우저가
-
-    그걸 PCM으로 디코드해 실제 마이크 입력과 같은 경로(/ws/call의 "audio" 메시지)로
-    흘려보낸다 — 그래야 서버 VAD/STT를 포함한 진짜 음성 파이프라인의 지연시간을 잰다.
-    """
-    body = await request.json()
-    text = (body.get("text") or "").strip()
-    if not text:
-        return Response(content="empty text", status_code=400, media_type="text/plain")
-
-    try:
-        audio = synthesize_speech(text)
-    except requests.HTTPError as exc:
-        log.exception("tts failed")
-        return Response(content=str(exc), status_code=502, media_type="text/plain")
-
-    return Response(content=audio, media_type="audio/mpeg")
-'''
-
 # Serve static/index.html at / (and index2.html at /index2.html) — mounted
-# last so /ws/call and /tts win the route match first.
+# last so /ws/browser and /tts win the route match first.
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
