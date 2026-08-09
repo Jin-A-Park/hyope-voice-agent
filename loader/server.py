@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-import audioop  # G.711 μ-law <-> PCM16 변환 + 리샘플링(claw-ops 브릿지 전용).
-                 # 3.13에서 제거 예정 — 그때는 audioop-lts로 교체.
+
+# ! G.711 μ-law <-> PCM16 변환 + 리샘플링(claw-ops 브릿지 전용).
+# ! 3.13에서 제거 예정 — 그때는 audioop-lts로 교체.
+import audioop
 import base64
 import json
 import logging
 import os
 import time
 import uuid
+from pathlib import Path
 
 import requests
 import websockets
@@ -19,8 +22,10 @@ from fastapi import (
 )
 from fastapi.staticfiles import StaticFiles
 
-import brain
-import gemini_realtime
+from agent import brain
+from loader import gemini_realtime
+
+ROOT = Path(__file__).resolve().parent.parent
 
 load_dotenv()
 
@@ -632,4 +637,4 @@ async def webhooks_status(request: Request, x_signature: str | None = Header(def
 
 # Serve static/index.html at / (and index2.html at /index2.html) — mounted
 # last so /ws/browser and /tts win the route match first.
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
+app.mount("/", StaticFiles(directory=str(ROOT / "static"), html=True), name="static")

@@ -16,15 +16,17 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("worker")
 
-GUARDIAN_ALERTS_FILE = Path("alerts/inbox.jsonl")
-PROCESSED_FILE = Path("alerts/processed.txt")
-OUTBOX = Path("guardian_outbox")
+ROOT = Path(__file__).resolve().parent.parent
+
+GUARDIAN_ALERTS_FILE = ROOT / "alerts" / "inbox.jsonl"
+PROCESSED_FILE = ROOT / "alerts" / "processed.txt"
+OUTBOX = ROOT / "guardian_outbox"
 POLL_SECONDS = 2
 
 # server.py가 통화 종료 시 여기 한 줄씩 남긴다(GUARDIAN_ALERTS_FILE과 같은 내구성 패턴) —
 # 실제 Spring 전송과 채점 모델 호출은 이 파일을 폴링하며 여기서 처리한다.
-CALL_RESULT_OUTBOX = Path("call_results_outbox.jsonl")
-CALL_RESULT_PROCESSED_FILE = Path("call_results_processed.txt")
+CALL_RESULT_OUTBOX = ROOT / "call_results_outbox.jsonl"
+CALL_RESULT_PROCESSED_FILE = ROOT / "call_results_processed.txt"
 SPRING_BASE_URL = os.environ.get("SPRING_BASE_URL", "http://localhost:8080")
 
 GUARDIAN_EMAIL = os.environ.get("GUARDIAN_EMAIL", "guardian@example.com")

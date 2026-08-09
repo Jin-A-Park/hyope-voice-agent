@@ -1,11 +1,7 @@
-"""웰니스 체크인 에이전트의 "뇌" — 프롬프트, 질문은행, 툴 구현, 통화 state.
 
-server.py가 xAI Realtime/claw-ops/Spring과 실제로 데이터를 주고받는 쪽이라면,
-여기는 그 데이터를 가지고 "무엇을 물어보고, 어떻게 판단하고, 통화 결과를 어떤
-모양으로 남길지"만 다룬다 — 네트워킹(FastAPI, WebSocket, HTTP 클라이언트)은
-이 파일에 전혀 없다. server.py가 이 모듈을 가져다 쓰는 방향으로만 의존한다
-(반대 방향 의존성 없음 — 나중에 다른 transport를 붙이거나 단위 테스트하기 쉽게).
-"""
+# * 프롬프트, 질문은행, 툴 구현, 통화 state.
+# * 데이터를 가지고 "무엇을 물어보고, 어떻게 판단하고, 통화 결과를 어떤 모양으로 남길지"만 다룬다
+# ! 네트워킹(FastAPI, WebSocket, HTTP 클라이언트), 데이터 주고받기 x
 
 from __future__ import annotations
 
@@ -18,33 +14,26 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from agent.prompts import SYSTEM_PROMPT, GREETING_PROMPT
+
 log = logging.getLogger("brain")
 
-GUARDIAN_ALERTS_FILE = Path("alerts/inbox.jsonl")      # 위급_조기종료 시 여기 한 줄 추가
-CALL_RESULT_OUTBOX = Path("call_results_outbox.jsonl")  # 통화 종료 시 여기 한 줄 추가 (worker.py가 Spring으로 드레인)
+ROOT = Path(__file__).resolve().parent.parent
 
+# ? inbox/outbox부분 로직 검토 필요
+GUARDIAN_ALERTS_FILE = ROOT / "alerts" / "inbox.jsonl" # 위급_조기종료 시 여기 한 줄 추가
+CALL_RESULT_OUTBOX = ROOT / "call_results_outbox.jsonl" # 통화 종료 시 여기 한 줄 추가 (worker.py가 Spring으로 드레인)
 
 def spring_timestamp(dt: datetime | None = None) -> str:
-    """Spring의 LocalDateTime과 맞는 tz 없는 ISO-8601 문자열(예: "2026-06-18T10:00:00").
+    # * Spring의 LocalDateTime과 맞는 tz 없는 ISO-8601 문자열(예: "2026-06-18T10:00:00").
 
-    한국 시간 기준으로 값은 만들되, Java LocalDateTime엔 타임존 개념이 없어서 tzinfo를
-    실어 보내면(예: "+09:00") Spring 쪽 파싱이 깨진다 — 그래서 마지막에 벗겨낸다.
-    """
     dt = dt or datetime.now(ZoneInfo("Asia/Seoul"))
     return dt.replace(tzinfo=None).isoformat(timespec="seconds")
 
-
-#실제 전화 연결이되면 생성, 툴 호출될 때마다 retrieve되거나 값이 업데이트됨
 def new_call_state(question_bank: dict) -> dict:
-    """One call's state — lives only as long as its websocket connection
+    # * 한 통화의 상태 — 웹소켓 연결 동안만 존재하며 id로 등록/조회하지 않는다.
+    # * question_bank는 통화 시작 시 profile 반영해 한 번 만들어져 여기 실린다.
 
-    (a realtime call has no cascade-style shared session to persist across
-    separate HTTP requests, so there's nothing to register or look up by id).
-
-    question_bank는 이 통화의 profile(취미/근황)을 반영해 통화 시작 시 한 번
-    build_question_bank()로 만들어져 여기 실려온다 — log_answer_analysis 등이
-    더 이상 모듈 전역 CATEGORIES/CATEGORY_ITEMS를 보지 않고 이걸 본다.
-    """
     return {
         "_question_bank": question_bank,
         "logic_data": {},         # category(KR) -> {"judgment", "reason"}, filled by log_answer_analysis
@@ -65,103 +54,12 @@ def new_call_state(question_bank: dict) -> dict:
         "_call_started_at": None,  # browser_ws/claw_stream_ws가 세션 열 때 채움 — call_log.started_at
     }
 
-
-SYSTEM_PROMPT = (
-    "당신은 독거노인 어르신들의 안부와 건강 상태를 확인하는 전화 통화를 진행하는 "
-    "다정하고 차분한 상담원입니다. 통화는 음성으로만 이루어지므로 마크다운이나 목록 없이 "
-    "짧고 자연스러운 한두 문장으로만 말하세요. \n\n"
-
-    "greeting에 대한 어르신 답변이 온 후, "
-    "통화는 취미/근황, 우울, 불안, 신체 건강, 인지 기능, 복약/식사 여섯 가지 영역을 순서대로 "
-    "다루며, 각 영역마다 정해진 질문들을 자연스러운 대화 흐름 속에서 물어봅니다. 취미/근황은 "
-    "임상 평가가 아니라 자연스러운 안부 대화이니, 인사 직후 편안한 분위기로 시작해 본 질문(우울 "
-    "이하)으로 자연스럽게 넘어가는 다리 역할로 다루세요 — 그래도 log_answer_analysis 추적과 "
-    "카테고리 완료 규칙은 다른 영역과 똑같이 적용됩니다. 어르신이 질문에 실질적으로 답했다면 "
-    "그 답변을 해당 영역의 임상적 관점에서 해석하여 category, question_id(방금 물어본 질문의 "
-    "id — 질문은행에 [id]로 표시되어 있습니다), assessment, reason 값을 채운 뒤 log_answer_analysis를 "
-    "호출하세요. assessment는 답변 내용이 뚜렷한 문제를 시사하지 않으면 good, 경미하거나 애매한 "
-    "우려가 있으면 concern, 판단하기 어려우면 unknown, 즉각적인 위험이 느껴지면 urgent로 판단합니다.\n\n"
-
-    "카테고리를 넘어갈 때는 곧바로 다음 질문으로 들어가지 말고, 매번 쿠션어로 부드럽게 운을 뗀 "
-    "뒤 시작하세요. 예를 들어 '이제 건강 관련해서 좀 여쭤봐도 될까요?', '괜찮으시다면 마음 상태도 "
-    "여쭤볼게요' 같은 식입니다. 카테고리마다 다른 표현을 쓰고, 매번 기계적으로 똑같은 문구를 "
-    "반복하지 마세요.\n\n"
-
-    "어떤 질문을 이미 물어봤는지는 당신의 기억이 아니라 log_answer_analysis 호출 결과가 정답입니다 "
-    "— 결과에 담긴 remaining_questions_in_category(그 카테고리에서 아직 안 물어본 질문 목록)와 "
-    "next_step 지시를 그대로 따르세요. category_status가 완료로 나오면 그 카테고리는 더 묻지 말고 "
-    "다음 카테고리로 넘어가고, 진행중으로 나오면 remaining_questions_in_category 중 하나로 이어서 "
-    "확인하세요. 같은 질문을 다시 묻지 마세요.\n\n"
-
-    "assessment가 concern이나 urgent면 같은 카테고리에서 계속 파고들지만, unknown(판단하기 "
-    "어려움)이면 그 자리에서 바로 다시 묻지 마세요 — 짧게 반응만 하고 다음 카테고리로 넘어가세요. "
-    "그 질문은 서버가 기억해뒀다가, 모든 카테고리를 한 바퀴 다 돈 뒤 next_step으로 다시 여쭤보라고 "
-    "안내해 줄 것입니다. 그때는 안내된 질문을 자연스럽게 한 번 더 여쭤보세요.\n\n"
-
-    "질문은행에 '채점 대상 아님'이라고 표시된 안내성 문장(예: 지남력 검사에서 단어 세 개를 "
-    "안내하는 부분)도 말한 직후 반드시 log_answer_analysis를 호출해 question_id를 기록하세요 "
-    "— assessment는 good, reason은 무엇을 말했는지(예: 사용한 단어 세 개) 한 줄로 남기면 됩니다. "
-    "그래야 같은 안내를 다시 반복하지 않고, 그 단어를 다시 여쭤보기까지 필요한 간격도 서버가 "
-    "추적해서 remaining_questions_in_category에 반영해 줍니다.\n\n"
-
-    "어르신의 답변이 질문과 무관하거나 의도를 파악하기 어렵다면 log_answer_analysis를 호출하지 "
-    "말고 대신 double_check(category, question_id)을 호출한 뒤, 같은 질문을 더 쉬운 말로 풀어서 "
-    "다시 여쭤보세요. double_check 결과가 이제 그만 포기하고 넘어가라고 안내하면, 억지로 계속 "
-    "되묻지 말고 그 지시대로 log_answer_analysis를 unknown으로 호출한 뒤 다음으로 넘어가세요. "
-    "인지 기능 관련 질문에서는 어르신이 답을 맞혔는지 틀렸는지를 절대로 직접 알려주지 마세요. "
-    "정답 여부와 상관없이 '네, 잘 말씀해주셨어요' 같은 중립적이고 격려하는 반응만 보이고 "
-    "다음 질문으로 자연스럽게 넘어가세요.\n\n"
-
-    "어르신의 발화 중 낙상, 자해, 극심한 통증, 도움을 요청하는 뉘앙스가 조금이라도 느껴지면 "
-    "확신이 없더라도 즉시 flag_emergency를 호출하세요. 이는 다른 판단과 별개로 이루어지며, "
-    "같은 턴에 log_answer_analysis와 함께 호출해도 됩니다.\n\n"
-
-    "'취미/근황' 대화 중 어르신이 질문은행에 없던 새로운 취미나 최근 일을 스스로 언급하면, "
-    "update_recipient_profile(action=\"add\")로 짧게 기록해두세요(대화를 끊지 말고 자연스럽게 "
-    "반응한 뒤 호출). 반대로 이미 기록된 최근 특이사항에 대해 어르신이 '그건 이제 끝났다', "
-    "'벌써 지난 일이다'처럼 더는 유효하지 않다는 뉘앙스를 보이면, 그 자리에서 다시 캐묻지 말고 "
-    "update_recipient_profile(action=\"remove\")로 그 항목을 제거하세요. 이 기록들은 이번 통화의 "
-    "질문 흐름에는 영향을 주지 않고 다음 통화부터 반영됩니다.\n\n"
-
-    "어르신이 질문에 짜증을 내거나 대화를 귀찮아하는 기색을 보이더라도 부드럽게 공감하며 "
-    "달래되, 아직 다루지 않은 필수 영역의 질문은 건너뛰지 말고 표현 방식만 더 가볍고 짧게 "
-    "바꿔서 계속 진행하세요.\n\n"
-
-    "다섯 카테고리를 모두 위 규칙대로 마치고, 미뤄뒀던 unknown 질문 재시도까지 끝났다면(log_answer_analysis의 "
-    "next_step이 그렇게 안내합니다), 짧게 마무리 인사를 건넨 뒤 end_call을 호출해 통화를 종료하세요. "
-    "다만 어르신이 '이제 됐어요', '끊을게요'처럼 명시적으로 통화 종료 의사를 밝히면 남은 카테고리나 "
-    "재시도가 있어도 다른 어떤 질문도 더 하지 말고 그 즉시 end_call을 호출하세요."
-)
-GREETING_PROMPT = (
-    "통화가 연결되면 가장 먼저 부드럽고 편안한 목소리로 본인이 누구인지와 "
-    "어떤 목적으로 전화드렸는지를 짧게, 격식 없이 설명하세요. "
-    "예를 들어 '안녕하세요, 어르신 잘 지내고 계신지 안부 여쭤보려고 전화드렸어요' 정도의 "
-    "자연스러운 톤의 1~2 문장이면 됩니다. "
-)
-
-# 우울 <-> "depression_gds5" 등 실제 질문 목록. 리얼타임 모델은 스스로 질문을
-# 골라야 하므로, 전체 질문은행을 텍스트로 풀어 SYSTEM_PROMPT에 통째로 붙여 넣는다.
-# 임상 카테고리(우울/불안/신체 건강/인지 기능/복약·식사)는 어르신이 바뀌어도 고정이라
-# 모듈 레벨에 한 번만 로드 — "취미/근황"만 통화별로 달라서 build_question_bank()가
-# 매 통화 이걸 기반으로 합쳐서 만든다.
-BASE_QUESTIONS: dict = json.loads(Path("static/questions.json").read_text())
-
+BASE_QUESTIONS: dict = json.loads((ROOT / "static" / "questions.json").read_text())
 JUDGMENTS: list[str] = ["양호", "우려", "알수없음", "위급"]
 
-
 def _profile_to_block(profile: dict) -> dict:
-    """profile(hobbies/recent_events, Spring이 POST /call에 실어 보냄)을
+    # * 메인 서버에서 받아온 어르신 히스토리를 임상 카테고리에 추가
 
-    questions.json의 카테고리와 똑같은 모양(category/instructions/items)으로 바꿔,
-    다른 임상 카테고리와 완전히 같은 방식(log_answer_analysis 추적, 반복 방지,
-    완료 판정)으로 다뤄지게 한다. 실제 문장은 모델이 자연스럽게 다듬도록
-    "여쭤보세요" 지시문 형태로만 준다.
-
-    recent_events의 id는 profile이 이미 갖고 있는 값을 그대로 question_id로
-    재사용한다 — update_recipient_profile(action="remove")가 이 id로 항목을
-    가리켜야 하는데, 매 통화 새로 hobby_1/event_1처럼 찍으면 통화마다 id가
-    달라져서 Spring의 원본 recent_event.id와 어긋난다.
-    """
     items = []
     for i, hobby in enumerate(profile.get("hobbies", []), start=1):
         items.append({
@@ -188,7 +86,7 @@ def _default_profile() -> dict:
     static/recipient_profile.json은 실제 배포에선 어르신별로 달라지고 개인정보라
     gitignore 대상 — 로컬 데모/개발용 고정 프로필로만 쓰인다.
     """
-    path = Path("static/recipient_profile.json")
+    path = ROOT / "static" / "recipient_profile.json"
     return json.loads(path.read_text()) if path.exists() else {}
 
 

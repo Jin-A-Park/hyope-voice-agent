@@ -23,7 +23,7 @@ import os
 import websockets
 from fastapi import WebSocket, WebSocketDisconnect
 
-import brain
+from agent import brain
 
 log = logging.getLogger("dispatcher")
 
