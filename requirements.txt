@@ -3,7 +3,7 @@ uvicorn[standard]
 openai          # worker.py's email drafting (chat completions via the OpenAI SDK)
 python-dotenv
 websockets      # server.py's realtime voice proxy (wss://api.x.ai/v1/realtime)
-requests        # server.py's /tts endpoint (xAI's native TTS, used by index2.html only)
+requests        # worker.py's POST to Spring (/internal/call-results)
 clawops         # server.py's claw-ops bridge (outbound calls, webhook signature verification)
 python-multipart  # required by FastAPI's request.form() — claw-ops webhooks POST form-encoded
 httpx           # server.py's POST to Spring (/call-result) — already a transitive dep via clawops, used directly now

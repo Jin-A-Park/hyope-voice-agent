@@ -3,3 +3,4 @@
 __pycache__/
 static/recipient_profile.json
 push.sh
+runtime/

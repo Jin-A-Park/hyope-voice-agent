@@ -16,13 +16,18 @@ from zoneinfo import ZoneInfo
 
 from agent.prompts import SYSTEM_PROMPT, GREETING_PROMPT
 
+
+
+
+
 log = logging.getLogger("brain")
 
 ROOT = Path(__file__).resolve().parent.parent
 
 # ? inbox/outbox부분 로직 검토 필요
-GUARDIAN_ALERTS_FILE = ROOT / "alerts" / "inbox.jsonl" # 위급_조기종료 시 여기 한 줄 추가
-CALL_RESULT_OUTBOX = ROOT / "call_results_outbox.jsonl" # 통화 종료 시 여기 한 줄 추가 (worker.py가 Spring으로 드레인)
+RUNTIME_DIR = ROOT / "runtime" # worker.py가 드레인하는 append 로그/원장류 임시 파일 전용 폴더
+GUARDIAN_ALERTS_FILE = RUNTIME_DIR / "alerts" / "inbox.jsonl" # 위급_조기종료 시 여기 한 줄 추가
+CALL_RESULT_OUTBOX = RUNTIME_DIR / "call_results" / "outbox.jsonl" # 통화 종료 시 여기 한 줄 추가 (worker.py가 Spring으로 드레인)
 
 def spring_timestamp(dt: datetime | None = None) -> str:
     # * Spring의 LocalDateTime과 맞는 tz 없는 ISO-8601 문자열(예: "2026-06-18T10:00:00").
@@ -46,19 +51,24 @@ def new_call_state(question_bank: dict) -> dict:
                                    # deferred to a final retry pass instead of hammered on immediately
         "double_check_counts": {},  # question_id -> times double_check'd without ever resolving —
                                      # caps the retry loop so a confused answer can't stall the call forever
-        "profile_updates": [],    # [{"action","kind","text"|"event_id","reason"}, ...] — filled by
+        "profile_updates": [],    # [{"action","kind","text"|"hobby_name"|"event_id","reason"}, ...] — filled by
                                    # update_recipient_profile, pushed to Spring at call end, next-call-only
         "call_log_entries": [],   # [{"sequence","question","answer","asked_at"}, ...] for Spring's call_log_entries
         "_last_agent_utterance": None,     # 직전 턴에 에이전트가 실제로 말한 문장 — 다음 어르신 답변과 페어링
         "_last_agent_utterance_at": None,  # 위 발화가 시작된 시각(ISO, tz 없음) — asked_at으로 씀
-        "_call_started_at": None,  # browser_ws/claw_stream_ws가 세션 열 때 채움 — call_log.started_at
+        "_call_started_at": None,  # browser_ws/call_stream_ws가 세션 열 때 채움 — call_log.started_at
     }
+
+# --------------------------------------------------------------------------
+# 수신자 맞춤형 질문 은행 생성
+# --------------------------------------------------------------------------
 
 BASE_QUESTIONS: dict = json.loads((ROOT / "static" / "questions.json").read_text())
 JUDGMENTS: list[str] = ["양호", "우려", "알수없음", "위급"]
 
 def _profile_to_block(profile: dict) -> dict:
-    # * 메인 서버에서 받아온 어르신 히스토리를 임상 카테고리에 추가
+    # * 메인 서버에서 받아온 어르신 히스토리를 임상 카테고리 포맷으로 변환
+    # * build_question_bank에 같이 추가
 
     items = []
     for i, hobby in enumerate(profile.get("hobbies", []), start=1):
@@ -79,27 +89,17 @@ def _profile_to_block(profile: dict) -> dict:
         "items": items,
     }
 
-
 def _default_profile() -> dict:
-    """Spring이 profile을 안 보낸 경우(브라우저 데모 /ws/browser)의 폴백.
+    # * 어르신 히스토리가 아직 없을 경우, 빈 파일 경로 초기화
 
-    static/recipient_profile.json은 실제 배포에선 어르신별로 달라지고 개인정보라
-    gitignore 대상 — 로컬 데모/개발용 고정 프로필로만 쓰인다.
-    """
     path = ROOT / "static" / "recipient_profile.json"
     return json.loads(path.read_text()) if path.exists() else {}
 
 
 def build_question_bank(profile: dict | None) -> dict:
-    """통화 하나에 쓸 질문은행을 만든다 — QUESTIONS/CATEGORIES/CATEGORY_ITEMS/
+    # * 통화(recipient)별로 state["_question_bank"]에 정보 추가
+    # * 안부 묻기로 시작 - 취미/근황을 다른 임상 카테고리보다 먼저 오게 처리
 
-    ALL_QUESTION_IDS를 예전엔 모듈 전역으로 한 번만 고정했는데, 이제 통화(recipient)마다
-    profile이 달라지니 매 통화 새로 만들어서 state["_question_bank"]에 담아 쓴다.
-
-    취미/근황을 다른 임상 카테고리보다 먼저 오게 앞에 꽂는다 — 인사 직후 부드러운
-    안부 대화로 시작해서 자연스럽게 본 질문으로 넘어가려는 의도(딕셔너리는 삽입
-    순서를 유지하므로 이 순서가 곧 categories 순서, 곧 진행 순서가 된다).
-    """
     profile = profile if profile is not None else _default_profile()
     questions = dict(BASE_QUESTIONS)
     block = _profile_to_block(profile)
@@ -109,8 +109,8 @@ def build_question_bank(profile: dict | None) -> dict:
     categories = [b["category"] for b in questions.values()]
     category_items = {b["category"]: b["items"] for b in questions.values()}
     all_question_ids = [item["id"] for items in category_items.values() for item in items]
-    # update_recipient_profile(action="remove")의 event_id enum용 — hobby는 삭제 대상이 아님.
-    event_ids = [event["id"] for event in profile.get("recent_events", [])]
+    event_ids = [event["id"] for event in profile.get("recent_events", [])] # 근황 정보 - 나중에 지울 때 필요
+    hobby_names = list(profile.get("hobbies", [])) # 취미 - 나중에 지울 때 필요 (hobby는 id가 없어 이름 자체가 식별자)
 
     return {
         "questions": questions,
@@ -118,13 +118,16 @@ def build_question_bank(profile: dict | None) -> dict:
         "category_items": category_items,
         "all_question_ids": all_question_ids,
         "event_ids": event_ids,
+        "hobby_names": hobby_names,
     }
 
-
 def build_tools(question_bank: dict) -> list[dict]:
+    # * 툴 스키마
+
     categories = question_bank["categories"]
     all_question_ids = question_bank["all_question_ids"]
     event_ids = question_bank["event_ids"] or ["_none"]  # 빈 enum은 JSON Schema 위반이라 더미로 채움
+    hobby_names = question_bank["hobby_names"] or ["_none"]
 
     return [
     {
@@ -208,10 +211,12 @@ def build_tools(question_bank: dict) -> list[dict]:
         "type": "function",
         "name": "update_recipient_profile",
         "description": "어르신이 질문은행에 없던 새 취미/근황을 언급하면 action=\"add\"로 기록하십시오. "
-                       "기존에 기록된 최근 특이사항(recent_events)에 대해 어르신이 '그건 이제 끝났다/지난 "
-                       "일이다'처럼 더 이상 유효하지 않다는 뉘앙스를 보이면, 그 자리에서 다시 묻지 말고 "
-                       "action=\"remove\"로 그 항목을 제거하십시오. 이 기록은 다음 통화부터 반영되며, "
-                       "지금 진행 중인 통화의 질문 흐름에는 영향을 주지 않습니다.",
+                       "기존에 기록된 취미나 최근 특이사항(recent_events)에 대해 어르신이 '그건 이제 "
+                       "안 해요/끝났다/지난 일이다'처럼 더 이상 유효하지 않다는 뉘앙스를 보이면, 그 자리에서 "
+                       "다시 묻지 말고 action=\"remove\"로 그 항목을 제거하십시오 — 취미는 kind=\"hobby\"와 "
+                       "함께 hobby_name을, 최근 특이사항은 kind=\"event\"와 함께 event_id를 넣으십시오. "
+                       "이 기록은 다음 통화부터 반영되며, 지금 진행 중인 통화의 질문 흐름에는 영향을 주지 "
+                       "않습니다.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -221,10 +226,15 @@ def build_tools(question_bank: dict) -> list[dict]:
                 "type": "string",
                 "description": "action=add일 때 새로 기록할 내용"
             },
+            "hobby_name": {
+                "type": "string",
+                "enum": hobby_names,
+                "description": "action=remove이고 kind=\"hobby\"일 때 제거할 취미명 (질문은행에 나온 표현 그대로)"
+            },
             "event_id": {
                 "type": "string",
                 "enum": event_ids,
-                "description": "action=remove일 때 제거할 recent_event의 id (질문은행에 [id]로 표시된 값)"
+                "description": "action=remove이고 kind=\"event\"일 때 제거할 recent_event의 id (질문은행에 [id]로 표시된 값)"
             },
             "reason": {
                 "type": "string",
@@ -242,20 +252,18 @@ def build_tools(question_bank: dict) -> list[dict]:
     }
     ]
 
-# --------------------------------------------------------------------------
-# 질문은행 -> 프롬프트 텍스트
-# --------------------------------------------------------------------------
-
-
 def _find_question(questions: dict, item_id: str) -> str | None:
+    # * id로 질문 조회(예: pending_retry 질문 받아오거나, 질문 순서 제약 걸려있을 때 어떤 질문인지 알고싶을 때)
+    
     for block in questions.values():
         for item in block["items"]:
             if item["id"] == item_id:
                 return item["question"]
     return None
 
-
 def build_question_bank_text(questions: dict) -> str:
+    # * 질문 목록 텍스트화
+
     lines = [
         "다음은 각 영역에서 실제로 사용할 정해진 질문 목록입니다. "
         "자연스러운 대화 흐름에 맞게 표현을 다듬어도 되지만, 의미는 그대로 유지하세요.",
@@ -277,16 +285,11 @@ def build_question_bank_text(questions: dict) -> str:
         lines.append("")
     return "\n".join(lines)
 
-
 _KOREAN_WEEKDAYS = ["월", "화", "수", "목", "금", "토", "일"]
 
-
 def current_date_context() -> str:
-    """지남력(sis_day/month/year) 문항을 채점할 때 모델이 오늘 날짜를 스스로 추측하지
-
-    않게 실제 날짜를 박아 넣는다 — 실시간 음성 모델은 학습 시점 지식만 갖고 있어서
-    이게 없으면 '오늘이 무슨 요일인지' 자체를 모른 채로 채점하게 된다.
-    """
+    # * 실제 날짜 정답
+    
     now = datetime.now(ZoneInfo("Asia/Seoul"))
     weekday = _KOREAN_WEEKDAYS[now.weekday()]
     return (
@@ -295,9 +298,9 @@ def current_date_context() -> str:
         "기준으로 정확하게 비교하세요. 정답을 어르신에게 절대로 노출하지 마세요."
     )
 
-
 def build_full_instructions(question_bank: dict) -> str:
-    """통화마다 새로 만든다 — 날짜가 바뀌어도, profile이 달라도 항상 맞게 반영되도록."""
+    # * 최종 instruction(프롬프트 + 날짜 정답 + 질문 텍스트 한 번에 합치기)
+
     return (
         SYSTEM_PROMPT + "\n\n" + current_date_context() + "\n\n"
         + build_question_bank_text(question_bank["questions"])
@@ -307,17 +310,12 @@ def build_full_instructions(question_bank: dict) -> str:
 # 툴 실행
 # --------------------------------------------------------------------------
 
-
 def checkin_start(state: dict) -> str:
     return json.dumps({"ok": True}, ensure_ascii=False)
 
-
 def _gap_satisfied(state: dict, item: dict) -> bool:
-    """sis_recall-style items (requires: {item, min_gap_questions}) aren't ready
+    # * requires(min_gap_questions) 있는 항목은 모델이 턴 수를 카운트하게 두지 않고 asked_order로 직접 확인한다.
 
-    until enough OTHER questions have come between them and their prerequisite —
-    tracked via asked_order instead of trusting the model to count turns itself.
-    """
     req = item.get("requires")
     if not req:
         return True
@@ -327,8 +325,9 @@ def _gap_satisfied(state: dict, item: dict) -> bool:
     gap = len(order) - order.index(req["item"]) - 1
     return gap >= req["min_gap_questions"]
 
-
 def log_answer_analysis(state: dict, category: str, question_id: str, assessment: str, reason: str) -> str:
+    # * 답변 판정을 기록하고, 그 카테고리에서 다음에 뭘 물어야 할지(next_step)를 계산해 돌려준다.
+
     category_items = state["_question_bank"]["category_items"]
 
     state["logic_data"][category] = {"judgment": assessment, "reason": reason}
@@ -348,17 +347,11 @@ def log_answer_analysis(state: dict, category: str, question_id: str, assessment
     ]
     random.shuffle(remaining)  # questions.json 순서대로 매번 똑같이 물어보지 않게
 
-    # sis_encode 같은 "채점 대상 아님" 안내문(type: statement)은 진짜 답변이 아니므로
-    # good을 찍어도 카테고리를 끝내면 안 된다 — 안 그러면 그 뒤에 이어질 실제 문항들
-    # (sis_day/month/year, sis_recall)이 통째로 스킵된다.
+    # sis_encode 같은 안내문(type: statement)은 good이어도 카테고리를 끝내면 안 된다 — 뒤이은 실제 문항이 스킵됨.
     asked_item = next((i for i in category_items.get(category, []) if i["id"] == question_id), None)
     is_statement = bool(asked_item and asked_item.get("type") == "statement")
 
-    # concern/urgent, 그리고 방금 물은 게 statement였던 경우는 같은 카테고리에서 계속
-    # 진행한다. unknown(판단 불가)은 그 자리에서 다시 묻지 않고 카테고리를 일단 마친 걸로
-    # 보되, pending_retry에 담아 모든 카테고리를 한 바퀴 돈 뒤 한 번 더 여쭤보게 한다 —
-    # 못 알아들은 질문을 바로 또 물으면 어르신이 더 헷갈릴 수 있어서, 대화가 자연스럽게
-    # 넘어간 뒤에 다시 시도하는 편이 낫다.
+    # unknown은 바로 재질문하지 않고 pending_retry에 담아 한 바퀴 돈 뒤 다시 묻는다 — 헷갈림 방지.
     if (is_statement or assessment in ("우려", "위급")) and remaining:
         why = "방금 건 채점 대상이 아닌 안내문일 뿐" if is_statement else f"'{category}'는 아직 good이 아닙니다"
         return json.dumps({
@@ -372,9 +365,7 @@ def log_answer_analysis(state: dict, category: str, question_id: str, assessment
     if assessment == "알수없음":
         state["pending_retry"].append({"category": category, "question_id": question_id})
 
-    # sis_recall처럼 "나중에 다시 여쭤보겠다"고 예고한 gap-conditional 항목은, good이
-    # 떠서 카테고리가 지금 바로 닫히더라도 그냥 버려지면 안 된다(약속을 어기게 됨) —
-    # 아직 안 물어봤다면 pending_retry에 담아 통화 끝에 반드시 다시 물어보게 한다.
+    # 카테고리가 지금 닫혀도, 아직 안 물어본 gap-conditional 항목(sis_recall 등)은 pending_retry에 담아 끝에 다시 묻는다.
     already_queued = {(p["category"], p["question_id"]) for p in state["pending_retry"]}
     for item in category_items.get(category, []):
         if item["id"] not in asked and item.get("requires") and (category, item["id"]) not in already_queued:
@@ -406,11 +397,11 @@ def log_answer_analysis(state: dict, category: str, question_id: str, assessment
         "next_step": next_step,
     }, ensure_ascii=False)
 
-
 DOUBLE_CHECK_LIMIT = 2  # 이 횟수를 넘기면 계속 되묻지 말고 unknown으로 넘어가게 한다
 
-
 def double_check(state: dict, category: str, question_id: str) -> str:
+    # * 답변 의도가 불명확할 때 호출됨 — DOUBLE_CHECK_LIMIT 넘게 반복되면 그만 포기하고 unknown으로 넘어가라고 안내한다.
+    
     counts = state["double_check_counts"]
     counts[question_id] = counts.get(question_id, 0) + 1
 
@@ -428,8 +419,8 @@ def double_check(state: dict, category: str, question_id: str) -> str:
         "next_step": "같은 질문을 더 쉬운 말로 풀어서 다시 여쭤보세요.",
     }, ensure_ascii=False)
 
-
 def flag_emergency(state: dict, signal: str, severity: str) -> str:
+    # * 낙상/자해 등 위험 신호를 기록만 해둔다 — 실제 알림 파일 기록은 end_call에서 emergencies 유무로 처리.
     state["emergencies"].append({
         "signal": signal,
         "severity": severity,
@@ -440,34 +431,34 @@ def flag_emergency(state: dict, signal: str, severity: str) -> str:
 
 def update_recipient_profile(
     state: dict, action: str, kind: str,
-    text: str | None = None, event_id: str | None = None, reason: str | None = None,
+    text: str | None = None, hobby_name: str | None = None, event_id: str | None = None,
+    reason: str | None = None,
 ) -> str:
-    """이번 통화의 질문 흐름·enum(state["_question_bank"])은 건드리지 않는다 — 그냥
+    # * 이번 통화의 질문 흐름은 안 건드리고 profile_updates에만 쌓아둔다 — 다음 통화 profile부터 반영됨.
 
-    state["profile_updates"]에 쌓아두면, 통화 끝에 Spring으로 보내는 결과에 실려서
-    다음 통화의 profile부터 반영된다(설계상 결정 — 라이브 세션 스키마 변경 없음).
-    """
     state["profile_updates"].append({
-        "action": action, "kind": kind, "text": text, "event_id": event_id, "reason": reason,
+        "action": action, "kind": kind, "text": text, "hobby_name": hobby_name,
+        "event_id": event_id, "reason": reason,
     })
     return json.dumps({"ok": True}, ensure_ascii=False)
 
-
-# 위급_조기종료면 보호자 알림을 파일로 남긴다(느린 발송은 worker.py 몫).
 def new_alert_id() -> str:
-    """A-1000, A-1001, ... — numbered by how many alerts are already filed."""
+    # TODO 위급_조기종료면 보호자 알림을 파일로 남긴다(실제 서버로 전송해야함).
+    #A-1000, A-1001, ... — numbered by how many alerts are already filed."""
+
     count = 0
     if GUARDIAN_ALERTS_FILE.exists():
         count = sum(1 for line in GUARDIAN_ALERTS_FILE.read_text().splitlines() if line.strip())
     return f"A-{1000 + count}"
 
-
 def end_call(state: dict) -> str:
+    # * 통화 종료
+
     emergencies = state["emergencies"]
     reason = "위급_조기종료" if emergencies else "정상_종료"
 
     if emergencies:
-        GUARDIAN_ALERTS_FILE.parent.mkdir(exist_ok=True)
+        GUARDIAN_ALERTS_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(GUARDIAN_ALERTS_FILE, "a") as f:
             f.write(json.dumps({
                 "id": new_alert_id(),
@@ -483,20 +474,16 @@ def end_call(state: dict) -> str:
         "next_step": "지금 바로 다음 답변으로 부드러운 작별 인사를 건네고 통화를 마치세요.",
     }, ensure_ascii=False)
 
-
 def write_call_result_outbox(state: dict, status: str) -> None:
-    """통화 종료 시 Spring에 보낼 원본 데이터를 로컬에 남긴다 — GUARDIAN_ALERTS_FILE과
+    # * Spring 전송용 원본 데이터를 로컬에 남긴다(실제 POST는 worker.py가 폴링)
+    # * 브라우저 데모는 skip
 
-    똑같은 내구성 패턴: 실제 POST(그리고 채점 모델 호출)는 worker.py가 폴링하며
-    처리하게 빼서, Spring이 잠깐 안 받아줘도 통화 종료 경로에서 데이터를 잃지 않는다.
-    브라우저 데모(/ws/browser)처럼 Spring이 트리거하지 않은 통화는 recipient_id가 없어
-    보낼 대상이 없으니 그냥 건너뛴다.
-    """
     metadata = state.get("_metadata") or {}
     recipient_id = metadata.get("recipient_id")
     if recipient_id is None:
         return
 
+    CALL_RESULT_OUTBOX.parent.mkdir(parents=True, exist_ok=True)
     with open(CALL_RESULT_OUTBOX, "a") as f:
         f.write(json.dumps({
             "id": f"CR-{uuid.uuid4().hex[:12]}",  # worker.py의 처리완료 원장(ledger) 키
@@ -513,14 +500,10 @@ def write_call_result_outbox(state: dict, status: str) -> None:
             "filed_at": time.time(),
         }, ensure_ascii=False) + "\n")
 
-
 def write_minimal_call_result(recipient_id, status: str) -> None:
-    """state 없이(발신 자체 실패, claw-ops 무응답/통화중 콜백처럼 통화가 시작도 못 한
+    # * state 없이(발신 실패, 무응답/통화중 콜백처럼 통화가 시작도 못 한 경우) 빈 값으로 최소 결과만 기록한다.
 
-    경우) 최소한의 결과만 기록한다. write_call_result_outbox와 같은 CALL_RESULT_OUTBOX에
-    쓰지만, call_log_entries/logic_data/emergencies/profile_updates가 애초에 없으니
-    빈 값으로 채운다.
-    """
+    CALL_RESULT_OUTBOX.parent.mkdir(parents=True, exist_ok=True)
     with open(CALL_RESULT_OUTBOX, "a") as f:
         f.write(json.dumps({
             "id": f"CR-{uuid.uuid4().hex[:12]}",
@@ -532,6 +515,8 @@ def write_minimal_call_result(recipient_id, status: str) -> None:
 
 
 def run_tool(state: dict, name: str, args: dict) -> str:
+    # * 툴 실행
+    
     log.info("tool call: %s(%s)", name, json.dumps(args, ensure_ascii=False))
     try:
         if name == "checkin_start":

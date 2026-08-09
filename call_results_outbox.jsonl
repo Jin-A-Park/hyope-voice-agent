@@ -1,1 +1,0 @@
-{"id": "CR-10d1a9c75a35", "recipient_id": 1, "call_log": {"started_at": "2026-08-07T21:54:29", "ended_at": "2026-08-07T21:55:05", "status": "COMPLETED"}, "call_log_entries": [{"sequence": 1, "question": "안녕하세요, 어르신.", "answer": "안녕.", "asked_at": "2026-08-07T21:54:41"}], "logic_data": {}, "emergencies": [], "profile_updates": [], "filed_at": 1786107305.2326624}

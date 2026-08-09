@@ -17,16 +17,17 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("worker")
 
 ROOT = Path(__file__).resolve().parent.parent
+RUNTIME_DIR = ROOT / "runtime" # brain.py가 쓰는 append 로그/원장류 임시 파일 전용 폴더 — agent/brain.py와 공유
 
-GUARDIAN_ALERTS_FILE = ROOT / "alerts" / "inbox.jsonl"
-PROCESSED_FILE = ROOT / "alerts" / "processed.txt"
-OUTBOX = ROOT / "guardian_outbox"
+GUARDIAN_ALERTS_FILE = RUNTIME_DIR / "alerts" / "inbox.jsonl"
+PROCESSED_FILE = RUNTIME_DIR / "alerts" / "processed.txt"
+OUTBOX = RUNTIME_DIR / "guardian_outbox"
 POLL_SECONDS = 2
 
 # server.py가 통화 종료 시 여기 한 줄씩 남긴다(GUARDIAN_ALERTS_FILE과 같은 내구성 패턴) —
 # 실제 Spring 전송과 채점 모델 호출은 이 파일을 폴링하며 여기서 처리한다.
-CALL_RESULT_OUTBOX = ROOT / "call_results_outbox.jsonl"
-CALL_RESULT_PROCESSED_FILE = ROOT / "call_results_processed.txt"
+CALL_RESULT_OUTBOX = RUNTIME_DIR / "call_results" / "outbox.jsonl"
+CALL_RESULT_PROCESSED_FILE = RUNTIME_DIR / "call_results" / "processed.txt"
 SPRING_BASE_URL = os.environ.get("SPRING_BASE_URL", "http://localhost:8080")
 
 GUARDIAN_EMAIL = os.environ.get("GUARDIAN_EMAIL", "guardian@example.com")
@@ -66,7 +67,7 @@ def draft_email(alert: dict) -> str:
 
 
 def send_email(alert: dict, body: str) -> Path:
-    OUTBOX.mkdir(exist_ok=True)
+    OUTBOX.mkdir(parents=True, exist_ok=True)
     subject = f"[긴급] 어르신 안부전화 조기종료 안내 — {alert['id']}"
     path = OUTBOX / f"{alert['id']}.eml"
     path.write_text(
@@ -86,7 +87,7 @@ def load_processed() -> set[str]:
 
 
 def mark_processed(alert_id: str) -> None:
-    PROCESSED_FILE.parent.mkdir(exist_ok=True)
+    PROCESSED_FILE.parent.mkdir(parents=True, exist_ok=True)
     with PROCESSED_FILE.open("a") as f:
         f.write(alert_id + "\n")
 
@@ -157,6 +158,7 @@ def load_call_result_processed() -> set[str]:
 
 
 def mark_call_result_processed(entry_id: str) -> None:
+    CALL_RESULT_PROCESSED_FILE.parent.mkdir(parents=True, exist_ok=True)
     with CALL_RESULT_PROCESSED_FILE.open("a") as f:
         f.write(entry_id + "\n")
 
