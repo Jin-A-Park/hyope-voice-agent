@@ -97,11 +97,16 @@ ASSESS_URL = os.environ.get("ASSESS_URL", "").strip()
 ASSESS_TIMEOUT = float(os.environ.get("ASSESS_TIMEOUT", "20"))
 
 
-def _placeholder_assessment(reason: str) -> tuple[dict, list]:
-    """채점 서비스를 못 쓸 때. 진짜 값이 아님을 risk_level/summary에 박아둔다."""
+def _placeholder_assessment(reason: str, measured_at: str) -> tuple[dict, list]:
+    """채점 서비스를 못 쓸 때. 진짜 값이 아님을 risk_level/summary에 박아둔다.
+
+    measured_at은 None을 쓰지 않는다 — Spring Assessment.measuredAt이 non-null이라
+    None을 보내면 DB엔 NULL로 저장되고, 프론트는 DateTime.parse(null)에서 그대로
+    죽어버린다("다시 시도" 에러 화면). 대신 통화 종료 시각(ended_at)을 쓴다.
+    """
     log.warning("compute_assessment: %s — placeholder 반환", reason)
     return {
-        "measured_at": None,
+        "measured_at": measured_at,
         "depression_score": 0.5, "emotional_stability": 0.5, "health_risk": 0.5,
         "cognitive_score": 0.5, "overall_risk": 0.5, "risk_level": "OBSERVE",
         "summary": f"채점 미연동({reason}) — placeholder 값입니다.",
@@ -109,7 +114,7 @@ def _placeholder_assessment(reason: str) -> tuple[dict, list]:
     }, []
 
 
-def compute_assessment(call_log_entries: list, logic_data: dict, emergencies: list) -> tuple[dict, list]:
+def compute_assessment(call_log_entries: list, logic_data: dict, emergencies: list, measured_at: str) -> tuple[dict, list]:
     """채점 서비스(hyope-ai serve/)에 위임한다.
 
     ASSESS_URL이 없으면 예전처럼 placeholder를 반환한다. 채점 서비스 없이도
@@ -121,7 +126,7 @@ def compute_assessment(call_log_entries: list, logic_data: dict, emergencies: li
     영영 못 만든다.
     """
     if not ASSESS_URL:
-        return _placeholder_assessment("ASSESS_URL 미설정")
+        return _placeholder_assessment("ASSESS_URL 미설정", measured_at)
 
     resp = requests.post(
         ASSESS_URL,
@@ -164,6 +169,7 @@ def pending_call_results() -> list[dict]:
 def push_call_result(entry: dict) -> None:
     assessment, adherence_records = compute_assessment(
         entry["call_log_entries"], entry["logic_data"], entry["emergencies"],
+        entry["call_log"]["ended_at"],
     )
     payload = {
         "recipient_id": entry["recipient_id"],
