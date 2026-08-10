@@ -103,7 +103,7 @@ def _placeholder_assessment(reason: str) -> tuple[dict, list]:
     return {
         "measured_at": None,
         "depression_score": 0.5, "emotional_stability": 0.5, "health_risk": 0.5,
-        "cognitive_score": 0.5, "overall_risk": 0.5, "risk_level": "LOW",
+        "cognitive_score": 0.5, "overall_risk": 0.5, "risk_level": "OBSERVE",
         "summary": f"채점 미연동({reason}) — placeholder 값입니다.",
         "recommendation": "채점 서비스 연동 후 재확인 필요.",
     }, []
