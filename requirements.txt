@@ -5,5 +5,5 @@ websockets      # server.py's realtime voice proxy (wss://api.x.ai/v1/realtime)
 requests        # worker.py's POST to Spring (/internal/call-results)
 clawops         # server.py's claw-ops bridge (outbound calls, webhook signature verification)
 python-multipart  # required by FastAPI's request.form() — claw-ops webhooks POST form-encoded
-httpx           # server.py's POST to Spring (/call-result) — already a transitive dep via clawops, used directly now
+httpx           # loader/geo.py's async calls to the Kakao Local API (nearby-resource lookup)
 audioop-lts

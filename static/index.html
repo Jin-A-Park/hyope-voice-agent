@@ -65,6 +65,19 @@
     border: 1px solid rgba(78,207,138,.4); border-radius: 999px;
     padding: .15rem .6rem;
   }
+
+  #profileForm {
+    width: 100%; max-width: 24rem; margin-bottom: 1rem; background: var(--panel);
+    border: 1px solid #2a2e3a; border-radius: .5rem; padding: .25rem .9rem;
+  }
+  #profileForm summary { cursor: pointer; padding: .6rem 0; color: var(--dim); font-size: .85rem; }
+  #profileForm .field { margin-bottom: .8rem; }
+  #profileForm label { display: block; font-size: .75rem; color: var(--dim); margin-bottom: .3rem; }
+  #profileForm input, #profileForm textarea {
+    width: 100%; background: #12141b; color: var(--text); border: 1px solid #2a2e3a;
+    border-radius: .35rem; padding: .4rem .5rem; font: inherit; resize: vertical;
+  }
+  #profileForm .hint { font-size: .7rem; color: var(--dim); margin-top: .25rem; }
 </style>
 </head>
 <body>
@@ -75,6 +88,27 @@
     <option value="">xAI (grok-voice-think-fast-2.0, 기본값)</option>
     <option value="gemini-3.1-flash-live-preview">Gemini Live (gemini-3.1-flash-live-preview)</option>
   </select>
+
+  <details id="profileForm">
+    <summary>테스트용 어르신 정보 (선택 — 비워두면 전화와 다르게 취미/근황/주소 기반 툴콜은 확인 못 함)</summary>
+    <div class="field">
+      <label for="fAddress">주소 (근처 도움처 검색용)</label>
+      <input id="fAddress" type="text" placeholder="예: 서울 동작구 상도로 369">
+    </div>
+    <div class="field">
+      <label for="fHobbies">취미 (한 줄에 하나씩)</label>
+      <textarea id="fHobbies" rows="2" placeholder="등산&#10;화초 가꾸기"></textarea>
+    </div>
+    <div class="field">
+      <label for="fEvents">최근 근황 (한 줄에 하나씩)</label>
+      <textarea id="fEvents" rows="2" placeholder="손주가 놀러 옴&#10;무릎 수술 받음"></textarea>
+    </div>
+    <div class="field">
+      <label for="fPhone">전화번호 (SMS 발송 테스트용)</label>
+      <input id="fPhone" type="tel" placeholder="01012345678">
+      <div class="hint">입력하면 send_resource_info 호출 시 이 번호로 실제 문자가 발송됩니다.</div>
+    </div>
+  </details>
 
   <div id="call">
     <button id="start" disabled>시작하기</button>
@@ -227,6 +261,22 @@ $("start").addEventListener("click", startCall);
 $("hangup").addEventListener("click", () => hangUp());
 $("reset").addEventListener("click", () => { hangUp(); $("log").innerHTML = ""; });
 
+function linesOf(id) {
+  return $(id).value.split("\n").map((s) => s.trim()).filter(Boolean);
+}
+
+function collectInit() {
+  const address = $("fAddress").value.trim();
+  const hobbies = linesOf("fHobbies");
+  const events = linesOf("fEvents").map((text, i) => ({ id: `evt_${i + 1}`, text }));
+  const hasProfile = address || hobbies.length || events.length;
+  return {
+    type: "init",
+    phone_number: $("fPhone").value.trim() || null,
+    profile: hasProfile ? { address: address || null, hobbies, recent_events: events } : null,
+  };
+}
+
 function startCall() {
   $("start").disabled = true;
   $("model").disabled = true;
@@ -237,7 +287,7 @@ function startCall() {
   const qs = model ? `?model=${encodeURIComponent(model)}` : "";
   ws = new WebSocket(`${proto}://${location.host}/ws/browser${qs}`);
 
-  ws.onopen = () => {};
+  ws.onopen = () => ws.send(JSON.stringify(collectInit()));
   ws.onmessage = (evt) => handleServerMessage(JSON.parse(evt.data));
   ws.onerror = () => addError("연결에 실패했습니다.");
   ws.onclose = () => { stopMicStreaming(); endUi(); };

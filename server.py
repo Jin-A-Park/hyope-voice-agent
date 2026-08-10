@@ -18,15 +18,14 @@ from fastapi import (
 )
 from fastapi.staticfiles import StaticFiles
 
-from agent import brain
-from loader import gemini_loader, worker
-from loader.sinks import OutputSink, BrowserSink, CallSink, call_media_to_pcm24k
+from agent import brain, tools as agent_tools
+from integrations import dispatch, worker
+from sinks import OutputSink, BrowserSink, CallSink, call_media_to_pcm24k
+
+import gemini_loader
 
 
-
-
-
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent  # server.py가 이제 프로젝트 루트에 있어 .parent 한 번이면 됨
 
 load_dotenv()
 
@@ -238,8 +237,9 @@ async def _pump_upstream(upstream, sink: OutputSink, state: dict, session_id: st
                 "[%s] 툴 선정 -> 툴 호출(%s): %.1f ms",
                 session_id, name, (t_called - t_selected) * 1000,
             )
-            # 서버가 tool 실행
-            result = brain.run_tool(state, name, args)
+            # 서버가 tool 실행 — flag_emergency(medium/low, 일반 신호)면 dispatch.dispatch_tool이
+            # agent_tools.run_tool 부르기 전에 지오코딩으로 nearby_resource를 채워 넣는다.
+            result = await dispatch.dispatch_tool(state, name, args)
             log.info(
                 "[%s] 툴 실행 소요(%s): %.1f ms",
                 session_id, name, (time.perf_counter() - t_called) * 1000,
@@ -292,15 +292,26 @@ async def _pump_upstream(upstream, sink: OutputSink, state: dict, session_id: st
 
 @app.websocket("/ws/browser")
 async def browser_ws(client_ws: WebSocket) -> None:
-    # * 브라우저 데모용 엔드포인트 — 메인 서버 트리거 없이 profile 없는 기본 질문은행으로 바로 통화 세션을 연다.
+    # * 브라우저 데모용 엔드포인트 — 메인 서버 트리거 없이, 프론트 폼에서 받은 profile로 통화 세션을 연다.
 
     await client_ws.accept()
     session_id = f"session-{uuid.uuid4().hex[:8]}"  # 로그 상관관계용 id — 조회 용도로 쓰이진 않는다
-    # profile x
-    question_bank = brain.build_question_bank(None)
+
+    # 프론트(index.html)가 오디오 스트리밍 시작 전 {"type":"init", "phone_number", "profile"}를
+    # 먼저 보낸다 — 실통화에서 PENDING_CALL_METADATA로 받는 것과 같은 모양이라, address 기반
+    # 지오코딩/SMS 발송/취미·근황 카테고리까지 전화와 동일한 코드 경로로 테스트할 수 있다.
+    init = await client_ws.receive_json()
+    profile = init.get("profile") or None
+    question_bank = brain.build_question_bank(profile)
     state = brain.new_call_state(question_bank)
     state["_call_started_at"] = brain.spring_timestamp()
     model = client_ws.query_params.get("model")
+    state["_metadata"] = {
+        "recipient_id": None,
+        "phone_number": init.get("phone_number") or None,
+        "profile": profile or {},
+        "model": model,
+    }
     log.info("call started: %s (model=%s)", session_id, model or "(default)")
 
     try:
@@ -320,7 +331,7 @@ async def browser_ws(client_ws: WebSocket) -> None:
                     "turn_detection": turn_detection_config(),
                     "input_audio_format": "pcm16",
                     "output_audio_format": "pcm16",
-                    "tools": brain.build_tools(question_bank),
+                    "tools": agent_tools.build_tools(question_bank),
                 },
             }))
 
@@ -415,7 +426,7 @@ async def call_stream_ws(client_ws: WebSocket) -> None:
                         "turn_detection": turn_detection_config(),
                         "input_audio_format": "pcm16",
                         "output_audio_format": "pcm16",
-                        "tools": brain.build_tools(question_bank),
+                        "tools": agent_tools.build_tools(question_bank),
                     },
                 }))
 
@@ -471,7 +482,9 @@ async def call_stream_ws(client_ws: WebSocket) -> None:
 
 async def _place_call(recipient_id, phone_number: str, profile: dict, model: str | None) -> None:
     # * 실제 전화 발신 — POST /call 응답과 분리하려 BackgroundTasks로 실행, 실패 시 CALL_RESULT_OUTBOX에 FAILED로 남긴다.
-    
+    # * profile.address는 여기서 미리 안 쓰고 그대로 PENDING_CALL_METADATA에 실어 보낸다 —
+    # * 지오코딩은 실제로 flag_emergency가 필요로 하는 순간에만 한다(integrations/dispatch.py의 dispatch_tool).
+
     base = public_base_url()
     try:
         call = await call_client().calls.create(

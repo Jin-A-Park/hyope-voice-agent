@@ -46,7 +46,7 @@
     "category": "인지기능",
     "name": "SIS",
     "instructions": {
-      "min_questions": 1
+      "min_questions": 5
     },
     "items": [
       {"id": "sis_encode", "type": "statement", "question": "흔한 일상 단어 세 개를 지금 무작위로 새로 골라(매번 다르게), '제가 단어 세 개를 말씀드릴게요 — [단어1], [단어2], [단어3]. 이따 다시 여쭤볼 테니 기억해 두세요.'라는 문장의 대괄호 부분에 실제로 채워서 말하세요. 대괄호 표시나 예시 문구를 그대로 읽지 마세요.", "note": "채점 대상 아님."},

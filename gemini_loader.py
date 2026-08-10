@@ -12,8 +12,9 @@ import os
 import websockets
 from fastapi import WebSocket, WebSocketDisconnect
 
-from agent import brain
-from loader.sinks import OutputSink, BrowserSink, CallSink, call_media_to_pcm16k, pcm24k_to_pcm16k
+from agent import brain, tools as agent_tools
+from integrations import dispatch
+from sinks import OutputSink, BrowserSink, CallSink, call_media_to_pcm16k, pcm24k_to_pcm16k
 
 
 
@@ -71,7 +72,7 @@ def _build_setup_message(question_bank: dict, model: str) -> dict:
                 "parts": [{"text": brain.build_full_instructions(question_bank)}],
             },
             "tools": [
-                {"functionDeclarations": _to_function_declarations(brain.build_tools(question_bank))},
+                {"functionDeclarations": _to_function_declarations(agent_tools.build_tools(question_bank))},
             ],
             "realtimeInputConfig": {
                 "automaticActivityDetection": {
@@ -156,7 +157,7 @@ async def _pump_upstream(upstream, sink: OutputSink, state: dict, session_id: st
                 function_responses = []
                 for fc in tool_call["functionCalls"]:
                     name = fc["name"]
-                    result = brain.run_tool(state, name, fc.get("args") or {})
+                    result = await dispatch.dispatch_tool(state, name, fc.get("args") or {})
                     function_responses.append({
                         "id": fc["id"], "name": name, "response": json.loads(result),
                     })
