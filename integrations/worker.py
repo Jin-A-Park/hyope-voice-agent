@@ -93,29 +93,46 @@ def process_once() -> int:
 # --------------------------------------------------------------------------
 
 
-def compute_assessment(call_log_entries: list, logic_data: dict, emergencies: list) -> tuple[dict, list]:
-    """실제 채점 모델 연동 전 스텁.
+ASSESS_URL = os.environ.get("ASSESS_URL", "").strip()
+ASSESS_TIMEOUT = float(os.environ.get("ASSESS_TIMEOUT", "20"))
 
-    별도 채점 모델이 call_log_entries/logic_data를 보고 depression_score 등 정규화된
-    점수와 adherence_records를 내는 게 최종 그림인데, 그 모델은 이번 작업 범위 밖이라
-    지금은 파이프라인(아웃박스 -> Spring 전송)을 끝까지 테스트할 수 있게 placeholder만
-    반환한다. 진짜 값이 아니므로 risk_level/summary에 명확히 표시해서 실수로 진짜 값처럼
-    쓰이지 않게 한다.
-    """
-    log.warning("compute_assessment: 채점 모델 미연동 — placeholder 값을 반환합니다")
-    assessment = {
+
+def _placeholder_assessment(reason: str) -> tuple[dict, list]:
+    """채점 서비스를 못 쓸 때. 진짜 값이 아님을 risk_level/summary에 박아둔다."""
+    log.warning("compute_assessment: %s — placeholder 반환", reason)
+    return {
         "measured_at": None,
-        "depression_score": 0.5,
-        "emotional_stability": 0.5,
-        "health_risk": 0.5,
-        "cognitive_score": 0.5,
-        "overall_risk": 0.5,
-        "risk_level": "LOW",
-        "summary": "채점 모델 미연동 — placeholder 값입니다.",
-        "recommendation": "채점 모델 연동 후 재확인 필요.",
-    }
-    adherence_records: list = []
-    return assessment, adherence_records
+        "depression_score": 0.5, "emotional_stability": 0.5, "health_risk": 0.5,
+        "cognitive_score": 0.5, "overall_risk": 0.5, "risk_level": "LOW",
+        "summary": f"채점 미연동({reason}) — placeholder 값입니다.",
+        "recommendation": "채점 서비스 연동 후 재확인 필요.",
+    }, []
+
+
+def compute_assessment(call_log_entries: list, logic_data: dict, emergencies: list) -> tuple[dict, list]:
+    """채점 서비스(hyope-ai serve/)에 위임한다.
+
+    ASSESS_URL이 없으면 예전처럼 placeholder를 반환한다. 채점 서비스 없이도
+    통화 → Spring 전송 파이프라인은 그대로 돌아야 하기 때문이다.
+
+    여기는 통화가 끝난 뒤 worker가 폴링하며 도는 경로라 지연에 여유가 있다.
+    실패하면 예외를 그대로 올려 push_call_result가 재시도하게 둔다 —
+    placeholder를 Spring에 보내고 처리완료로 찍어버리면 그 통화의 진짜 점수는
+    영영 못 만든다.
+    """
+    if not ASSESS_URL:
+        return _placeholder_assessment("ASSESS_URL 미설정")
+
+    resp = requests.post(
+        ASSESS_URL,
+        json={"call_log_entries": call_log_entries,
+              "logic_data": logic_data,
+              "emergencies": emergencies},
+        timeout=ASSESS_TIMEOUT,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return data["assessment"], data.get("adherence_records", [])
 
 
 def load_call_result_processed() -> set[str]:
