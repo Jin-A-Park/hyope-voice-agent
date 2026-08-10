@@ -137,7 +137,11 @@ def compute_assessment(call_log_entries: list, logic_data: dict, emergencies: li
     )
     resp.raise_for_status()
     data = resp.json()
-    return data["assessment"], data.get("adherence_records", [])
+    assessment = data["assessment"]
+    # serve/assess.py는 통화 시각을 모르니 measured_at을 항상 None으로 두고
+    # "worker.py가 채운다"고 위임한다 — 그 계약을 여기서 이행한다.
+    assessment["measured_at"] = measured_at
+    return assessment, data.get("adherence_records", [])
 
 
 def load_call_result_processed() -> set[str]:
@@ -178,6 +182,7 @@ def push_call_result(entry: dict) -> None:
         "assessment": assessment,
         "adherence_records": adherence_records,
         "profile_updates": entry["profile_updates"],  # Spring 원본 스펙엔 없는 확장 필드 — 조율 필요
+        "incomplete_categories": entry.get("incomplete_categories", []),  # 이 필드 없는 예전 outbox 항목과 하위호환
     }
     resp = requests.post(
         f"{SPRING_BASE_URL}/internal/call-results",

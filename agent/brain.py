@@ -195,6 +195,14 @@ def write_call_result_outbox(state: dict, status: str) -> None:
     if recipient_id is None:
         return
 
+    # 통화가 조기 종료(어르신이 먼저 끊음, 위급상황 등)되면 일부 카테고리는 아예 못 다룰 수
+    # 있다 — completed_categories에 없는 카테고리를 "미확인"으로 남겨 Spring/프론트까지
+    # 흘려보낸다(채점엔 반영 안 함, 사람이 보고 판단하라는 표시 용도).
+    all_categories = state["_question_bank"]["categories"]
+    incomplete_categories = [
+        c for c in all_categories if c not in state["completed_categories"]
+    ]
+
     CALL_RESULT_OUTBOX.parent.mkdir(parents=True, exist_ok=True)
     with open(CALL_RESULT_OUTBOX, "a") as f:
         f.write(json.dumps({
@@ -209,6 +217,7 @@ def write_call_result_outbox(state: dict, status: str) -> None:
             "logic_data": state["logic_data"],
             "emergencies": state["emergencies"],
             "profile_updates": state["profile_updates"],
+            "incomplete_categories": incomplete_categories,
             "filed_at": time.time(),
         }, ensure_ascii=False) + "\n")
 
