@@ -48,7 +48,10 @@
   }
   #reset:hover { color: var(--text); border-color: var(--dim); }
 
-  #log { width: 100%; max-width: 40rem; margin-top: 2rem; display: flex; flex-direction: column; gap: .6rem; }
+  #log {
+    width: 100%; max-width: 40rem; margin-top: 2rem; display: flex; flex-direction: column; gap: .6rem;
+    max-height: 45vh; overflow-y: auto; padding-right: .3rem; scroll-behavior: smooth;
+  }
   .msg { display: flex; flex-direction: column; max-width: 80%; }
   .msg.elder { align-self: flex-end; align-items: flex-end; }
   .msg.agent { align-self: flex-start; align-items: flex-start; }
@@ -282,6 +285,10 @@ function startCall() {
   $("model").disabled = true;
   status("연결 중…");
 
+  $("log").innerHTML = "";
+  currentAgentBubble = null;
+  currentElderBubble = null;
+
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const model = $("model").value;
   const qs = model ? `?model=${encodeURIComponent(model)}` : "";
@@ -347,7 +354,19 @@ function bubbleFor(role) {
   return div;
 }
 
+// 사용자가 이력을 보려고 위로 스크롤해둔 상태면 새 메시지가 와도 방해하지 않고,
+// 이미 맨 아래(최신)를 보고 있던 경우에만 자동으로 따라 내려간다.
+function isLogNearBottom() {
+  const log = $("log");
+  return log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+}
+
+function stickLogToBottom(wasNearBottom) {
+  if (wasNearBottom) $("log").scrollTop = $("log").scrollHeight;
+}
+
 function appendTranscript(role, delta, fullText) {
+  const wasNearBottom = isLogNearBottom();
   const div = bubbleFor(role);
   const bubble = div.querySelector(".bubble");
   if (fullText !== undefined && fullText !== null) {
@@ -356,10 +375,11 @@ function appendTranscript(role, delta, fullText) {
   } else {
     bubble.textContent += delta ?? "";
   }
-  $("log").scrollTop = $("log").scrollHeight;
+  stickLogToBottom(wasNearBottom);
 }
 
 function addToolChip(name) {
+  const wasNearBottom = isLogNearBottom();
   let holder = $("log").lastElementChild;
   let tools = holder && holder.classList.contains("tools") ? holder : null;
   if (!tools) {
@@ -370,14 +390,16 @@ function addToolChip(name) {
   const chip = document.createElement("span");
   chip.textContent = "🔧 " + name;
   tools.appendChild(chip);
-  $("log").scrollTop = $("log").scrollHeight;
+  stickLogToBottom(wasNearBottom);
 }
 
 function addError(message) {
+  const wasNearBottom = isLogNearBottom();
   const div = document.createElement("div");
   div.className = "err";
   div.textContent = message;
   $("log").appendChild(div);
+  stickLogToBottom(wasNearBottom);
 }
 
 init();
