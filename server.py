@@ -174,6 +174,10 @@ async def _pump_upstream(upstream, sink: OutputSink, state: dict, session_id: st
     # 대화 로깅용 — 에이전트 발화는 delta로 쪼개져 오므로 한 턴 끝날 때까지 모았다가 한 줄로 찍는다.
     agent_text_parts: list[str] = []
 
+    # transcription.completed는 item당 status=in_progress -> completed 두 번 오고, 드물게
+    # 같은 item_id로 completed가 통째로 재전송되기도 한다 — item당 최종본 한 번만 받아들인다.
+    _completed_transcription_item_ids: set[str] = set()
+
     def _mark_answer_started() -> None:
         """response.output_audio(.transcript).delta가 오는 시점 = LLM 답변 생성 시작."""
         if timing["tool_called"] is None:
@@ -204,6 +208,16 @@ async def _pump_upstream(upstream, sink: OutputSink, state: dict, session_id: st
             })
 
         elif etype == "conversation.item.input_audio_transcription.completed":
+            # status=in_progress인 중간 버전은 건너뛴다 — completed만 최종 텍스트다.
+            if event.get("status") != "completed":
+                continue
+            # 같은 item_id로 completed가 또 오면(업스트림 재전송) 무시 — item당 한 번만 반영.
+            item_id = event.get("item_id")
+            if item_id in _completed_transcription_item_ids:
+                continue
+            if item_id is not None:
+                _completed_transcription_item_ids.add(item_id)
+
             timing["voice_in"] = time.perf_counter()
             transcript = event.get("transcript", "")
             log.info("\n[%s] 어르신: %s", session_id, transcript)  # 앞 줄바꿈으로 이전 턴과 구분
