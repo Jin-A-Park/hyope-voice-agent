@@ -34,6 +34,7 @@ log = logging.getLogger("dispatcher")
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    # ! 웹 버전에서는 worker.py 사용 x
     # worker.py의 폴링 루프(runtime/ 알림·통화결과 파일 -> Spring)를 같은 프로세스의 백그라운드
     # 스레드로 돌린다 — Railway에 별도 서비스로 올리면 컨테이너가 갈려서 runtime/ 파일을
     # 서로 못 보게 된다. 같은 프로세스에 두면 파일시스템이 자동으로 공유된다.
@@ -114,9 +115,9 @@ def public_base_url() -> str:
     return require_env("PUBLIC_BASE_URL").rstrip("/")
 
 # ? POST /call에서 발신 시 채워두고, /ws/call-stream의 start 이벤트(callId)로 꺼내
-# state["_metadata"]에 심는다. HTTP 요청(/call)과 WS 접속(claw-ops가 나중에 별도로
-# 걸어옴)이 서로 다른 요청이라 callId로 이어줄 방법이 이거 말고 없다 — 단일 프로세스
-# 배포를 전제로 한 인메모리 저장(다른 상태 저장과 동일한 방식).
+# ? state["_metadata"]에 심는다. HTTP 요청(/call)과 WS 접속(claw-ops가 나중에 별도로
+# ? 걸어옴)이 서로 다른 요청이라 callId로 이어줄 방법이 이거 말고 없다 — 단일 프로세스
+# ? 배포를 전제로 한 인메모리 저장(다른 상태 저장과 동일한 방식).
 PENDING_CALL_METADATA: dict[str, dict] = {}
 
 async def _pump_downstream(client_ws: WebSocket, upstream) -> None:
