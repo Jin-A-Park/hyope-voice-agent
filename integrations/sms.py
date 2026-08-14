@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime
 
 from clawops import AsyncClawOps, ClawOps
 
@@ -36,13 +37,18 @@ def _sms_client_sync() -> ClawOps:
     return _sync_client
 
 
+def _resource_sms_body(resources: list[dict]) -> str:
+    entries = "\n\n".join(f"{r['name']} {r['phone']}\n{r['address']}" for r in resources)
+    return f"안녕하세요 어르신, 요청하신 정보 드릴게요.\n\n{entries}\n\n감사합니다."
+
+
 async def send_resource_sms(to: str, resources: list[dict]) -> bool:
     """resources({"name","phone","address"} 목록)를 to로 문자 발송. 성공하면 True.
 
     발신 실패는 전부 여기서 흡수해 False만 돌려준다 — 호출부(integrations/dispatch.py)가 이것 때문에
     죽지 않고, agent/tools.py가 "직접 불러드리세요" 폴백 안내로 자연스럽게 넘어가게 설계돼 있다.
     """
-    body = "\n".join(f"{r['name']} {r['phone']}" for r in resources)
+    body = _resource_sms_body(resources)
     try:
         await _sms_client().messages.create(
             to=to, from_=os.environ["CLAWOPS_FROM_NUMBER"], body=body, type="sms",
@@ -53,18 +59,42 @@ async def send_resource_sms(to: str, resources: list[dict]) -> bool:
     return True
 
 
-def send_emergency_sms(to: str, recipient_name: str, signal: str) -> bool:
-    """위급 상황 감지 시 보호자에게 즉시 문자 발송. 성공하면 True.
+def _emergency_sms_body(recipient_name: str, signal: str) -> str:
+    detected_at = datetime.now().strftime("%m월 %d일 %H:%M")
+    return (
+        "[하이오피] 위급 상황 알림\n"
+        f"대상자: {recipient_name}님\n"
+        f"감지 내용: {signal}\n"
+        f"감지 시각: {detected_at}\n\n"
+        "앱에서 자세한 내용을 확인해 주세요."
+    )
 
-    integrations/worker.py(동기 폴링 스크립트)에서 호출되므로 동기 클라이언트를 쓴다.
+
+async def send_emergency_sms_async(to: str, recipient_name: str, signal: str) -> bool:
+    """위급 상황 감지 즉시(통화 중, integrations/dispatch.py에서) 보호자에게 문자 발송. 성공하면 True.
+
     발신 실패는 send_resource_sms와 동일하게 여기서 흡수해 False만 돌려준다 — 대시보드
-    알림(Spring 쪽)은 이미 남았으니, SMS 하나가 일시적으로 실패했다고 worker.py가
-    전체 알림 처리를 재시도하며 대시보드 알림을 중복 생성하게 만들 필요는 없다.
+    알림(Spring 쪽)은 이미 남았으니, SMS 하나 실패했다고 통화 흐름을 막을 이유는 없다.
     """
-    body = f"[하이오피] {recipient_name}님에게 위급 상황이 감지되었습니다: {signal}. 앱에서 확인해주세요."
+    try:
+        await _sms_client().messages.create(
+            to=to, from_=os.environ["CLAWOPS_FROM_NUMBER"],
+            body=_emergency_sms_body(recipient_name, signal), type="sms",
+        )
+    except Exception:
+        log.exception("send_emergency_sms_async failed — dashboard notification already filed, continuing")
+        return False
+    return True
+
+
+def send_emergency_sms(to: str, recipient_name: str, signal: str) -> bool:
+    """위급 상황 알림을 integrations/worker.py(동기 폴링 스크립트)가 파일 폴백으로 재처리할 때 쓰는
+    동기 버전. 통화 중 즉시 경로는 send_emergency_sms_async를 쓴다. 흡수 정책은 동일.
+    """
     try:
         _sms_client_sync().messages.create(
-            to=to, from_=os.environ["CLAWOPS_FROM_NUMBER"], body=body, type="sms",
+            to=to, from_=os.environ["CLAWOPS_FROM_NUMBER"],
+            body=_emergency_sms_body(recipient_name, signal), type="sms",
         )
     except Exception:
         log.exception("send_emergency_sms failed — dashboard notification already filed, continuing")

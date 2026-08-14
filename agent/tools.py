@@ -164,17 +164,20 @@ def build_tools(question_bank: dict) -> list[dict]:
         "type": "function",
         "name": "send_resource_info",
         "description": "flag_emergency, log_answer_analysis, search_nearby_resource 응답으로 방금 이름만 "
-                       "안내해드린 도움처 중 하나를, 어르신이 더 궁금해하시거나 문자로 연락처를 받고 싶다고 "
-                       "하셨을 때 호출하십시오. 어르신이 아직 관심을 보이지 않았는데 먼저 호출하지 마십시오.",
+                       "안내해드린 도움처 중, 어르신이 더 궁금해하시거나 문자로 연락처를 받고 싶다고 "
+                       "하셨을 때 호출하십시오. 여러 곳을 한꺼번에 원하시면(예: '다 보내주세요') 전부 "
+                       "배열에 담아 한 번만 호출하십시오 — 문자 한 통으로 합쳐서 보냅니다. 어르신이 "
+                       "아직 관심을 보이지 않았는데 먼저 호출하지 마십시오.",
         "parameters": {
             "type": "object",
             "properties": {
-            "resource_name": {
-                "type": "string",
-                "description": "문자로 보내드릴 곳의 이름 — 방금 안내드린 이름 그대로 넣으십시오."
+            "resource_names": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "문자로 보내드릴 곳들의 이름 — 방금 안내드린 이름 그대로. 여러 곳이면 전부 담으십시오."
             }
             },
-            "required": ["resource_name"]
+            "required": ["resource_names"]
         }
     },
     {
@@ -441,13 +444,15 @@ def _help_resource_for(signal: str, nearby_resource: list[dict] | None) -> list[
     return HELP_RESOURCES.get(category, HELP_RESOURCES["default"])
 
 def flag_emergency(
-    state: dict, signal: str, severity: str, nearby_resource: list[dict] | None = None,
+    state: dict, signal: str, severity: str,
+    nearby_resource: list[dict] | None = None, alert_dispatched: bool = False,
 ) -> str:
     # * 낙상/자해 등 위험 신호를 기록한다. severity로 다음 행동이 갈린다 — high는 감지된 그
-    # * 즉시(통화가 언제 끝나는지와 무관하게) 보호자 알림 파일에 기록하고, medium/low는
-    # * 보호자 알림 없이 통화 중 바로 어르신께 도움 받을 곳을 안내하게 한다.
-    # * nearby_resource는 모델이 주는 게 아니라, 통화 중 이 tool이 실제로 호출되는 그 순간에
-    # * integrations/geo.py가 지오코딩해서 넘겨주는 값이다(여기선 네트워킹 안 함).
+    # * 즉시(통화가 언제 끝나는지와 무관하게) Spring 대시보드 알림 + 보호자 SMS를 시도하고,
+    # * medium/low는 보호자 알림 없이 통화 중 바로 어르신께 도움 받을 곳을 안내하게 한다.
+    # * nearby_resource/alert_dispatched는 모델이 주는 게 아니라, 통화 중 이 tool이 실제로 호출되는
+    # * 그 순간에 integrations/dispatch.py가 지오코딩·Spring 통보를 미리 해서 넘겨주는 값이다
+    # * (여기선 네트워킹 안 함).
     state["emergencies"].append({
         "signal": signal,
         "severity": severity,
@@ -455,17 +460,19 @@ def flag_emergency(
     })
 
     if severity == "high":
-        # end_call까지 기다리면 모델이 남은 질문을 계속 진행하는 동안 보호자 알림이 몇 분씩
-        # 늦어질 수 있다 — 통화 종료 여부와 상관없이 감지 즉시 기록한다.
-        brain.GUARDIAN_ALERTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(brain.GUARDIAN_ALERTS_FILE, "a") as f:
-            f.write(json.dumps({
-                "id": new_alert_id(),
-                "alert": signal,
-                "logic_data": state["logic_data"],
-                "metadata": state.get("_metadata") or {},  # recipient_id/phone_number from POST /call
-                "filed_at": time.time(),
-            }, ensure_ascii=False) + "\n")
+        if not alert_dispatched:
+            # dispatch.py의 즉시 통보(Spring+SMS)가 실패했을 때만 파일에 남긴다 — 성공했으면
+            # 대시보드 알림이 이미 만들어졌으므로 여기 또 남기면 중복이 된다. 이 파일은 이제
+            # 정상 경로가 아니라 실패 시 재시도용 안전망이다(integrations/worker.py가 드레인).
+            brain.GUARDIAN_ALERTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(brain.GUARDIAN_ALERTS_FILE, "a") as f:
+                f.write(json.dumps({
+                    "id": new_alert_id(),
+                    "alert": signal,
+                    "logic_data": state["logic_data"],
+                    "metadata": state.get("_metadata") or {},  # recipient_id/phone_number from POST /call
+                    "filed_at": time.time(),
+                }, ensure_ascii=False) + "\n")
         next_step = "보호자에게 알리는 절차가 진행됩니다. 침착하게 어르신을 안심시키는 말을 건네세요."
     else:
         resources = _help_resource_for(signal, nearby_resource)
@@ -516,12 +523,26 @@ def find_offered_resource(state: dict, resource_name: str) -> dict | None:
             return r
     return None
 
-def send_resource_info(state: dict, resource_name: str, sms_sent: bool = False) -> str:
-    # * sms_sent는 모델이 주는 게 아니라, integrations/dispatch.py가 실제로 문자를 보내본 결과를 넣어준다
-    # * (여기선 발송 자체는 안 함).
+def find_offered_resources(state: dict, resource_names: list[str]) -> list[dict]:
+    # * find_offered_resource를 여러 이름에 대해 반복 — 어르신이 "다 보내주세요"처럼 한꺼번에
+    # * 요청했을 때, 모델이 방금 안내한 이름들을 그대로 배열로 넘긴다. 같은 곳이 중복 매칭되면 한 번만.
 
-    resource = find_offered_resource(state, resource_name)
-    if resource is None:
+    found: list[dict] = []
+    seen: set[str] = set()
+    for resource_name in resource_names or []:
+        r = find_offered_resource(state, resource_name)
+        if r and r["name"] not in seen:
+            found.append(r)
+            seen.add(r["name"])
+    return found
+
+def send_resource_info(state: dict, resource_names: list[str], sms_sent: bool = False) -> str:
+    # * sms_sent는 모델이 주는 게 아니라, integrations/dispatch.py가 실제로 문자를 보내본 결과를 넣어준다
+    # * (여기선 발송 자체는 안 함). resource_names가 여럿이면 문자 한 통에 합쳐서 나간다
+    # * (integrations/sms.py의 send_resource_sms가 resources 리스트를 한 메시지로 만든다).
+
+    resources = find_offered_resources(state, resource_names)
+    if not resources:
         return json.dumps({
             "ok": False,
             "next_step": "방금 안내해드린 곳 중 어디를 말씀하시는 건지 다시 자연스럽게 여쭤보세요.",
@@ -530,10 +551,8 @@ def send_resource_info(state: dict, resource_name: str, sms_sent: bool = False) 
     if sms_sent:
         next_step = "문자로 보내드렸다고 안내하세요."
     else:
-        next_step = (
-            "문자 전송에 실패했으니, 대신 지금 전화로 알려드리세요: "
-            f"{resource['name']} {resource['phone']}."
-        )
+        listing = ", ".join(f"{r['name']} {r['phone']}" for r in resources)
+        next_step = f"문자 전송에 실패했으니, 대신 지금 전화로 알려드리세요: {listing}."
     return json.dumps({"ok": True, "next_step": next_step}, ensure_ascii=False)
 
 
