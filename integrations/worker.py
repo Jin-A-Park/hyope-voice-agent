@@ -10,6 +10,8 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
+from integrations import sms
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -30,8 +32,10 @@ SPRING_BASE_URL = os.environ.get("SPRING_BASE_URL", "http://localhost:8080")
 
 
 def push_guardian_alert(alert: dict) -> None:
-    # high-severity 알림을 Spring에 구조화된 데이터로 넘긴다 — 문구 작성/실제 발송(이메일·SMS·푸시)과
-    # 보호자 연락처는 그 정보를 이미 갖고 있는 Spring이 처리한다(push_call_result와 동일한 패턴).
+    # high-severity 알림을 Spring에 구조화된 데이터로 넘긴다 — 대시보드 알림 생성과 보호자
+    # 연락처 조회는 그 정보를 이미 갖고 있는 Spring이 처리한다(push_call_result와 동일한 패턴).
+    # 다만 Spring엔 SMS 발신 수단이 없으므로, 실제 문자 발송은 여기서 기존 ClawOps 클라이언트로
+    # 한다 — Spring이 응답으로 돌려준 보호자 번호를 그대로 쓴다.
     payload = {
         "recipient_id": (alert.get("metadata") or {}).get("recipient_id"),
         "signal": alert["alert"],
@@ -46,6 +50,12 @@ def push_guardian_alert(alert: dict) -> None:
         timeout=10.0,
     )
     resp.raise_for_status()
+    data = resp.json()
+
+    # SMS 실패는 raise하지 않는다 — 대시보드 알림은 이미 생성됐으므로, SMS만 재시도하겠다고
+    # 이 함수 전체를 재시도하면 Spring 쪽 알림이 매번 중복 생성된다.
+    if not sms.send_emergency_sms(data["guardian_phone_number"], data["recipient_name"], alert["alert"]):
+        log.warning("guardian emergency SMS failed (dashboard notification already filed): %s", alert["id"])
 
 
 def load_processed() -> set[str]:
