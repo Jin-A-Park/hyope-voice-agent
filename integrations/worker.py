@@ -114,11 +114,13 @@ def _placeholder_assessment(reason: str, measured_at: str) -> tuple[dict, list]:
     }, []
 
 
-def compute_assessment(call_log_entries: list, logic_data: dict, emergencies: list, measured_at: str) -> tuple[dict, list]:
+def compute_assessment(call_log_entries: list, logic_data: dict, emergencies: list, measured_at: str) -> tuple[dict, list, list | None]:
     """채점 서비스(hyope-ai serve/)에 위임한다.
 
     ASSESS_URL이 없으면 예전처럼 placeholder를 반환한다. 채점 서비스 없이도
-    통화 → Spring 전송 파이프라인은 그대로 돌아야 하기 때문이다.
+    통화 → Spring 전송 파이프라인은 그대로 돌아야 하기 때문이다. 이 경로엔
+    척도 판정이 없어 incomplete_categories를 낼 수 없으므로 None을 돌려주고,
+    호출부가 outbox entry(brain.py가 통화 흐름 기준으로 낸 값)로 대체하게 한다.
 
     여기는 통화가 끝난 뒤 worker가 폴링하며 도는 경로라 지연에 여유가 있다.
     실패하면 예외를 그대로 올려 push_call_result가 재시도하게 둔다 —
@@ -126,7 +128,8 @@ def compute_assessment(call_log_entries: list, logic_data: dict, emergencies: li
     영영 못 만든다.
     """
     if not ASSESS_URL:
-        return _placeholder_assessment("ASSESS_URL 미설정", measured_at)
+        assessment, adherence_records = _placeholder_assessment("ASSESS_URL 미설정", measured_at)
+        return assessment, adherence_records, None
 
     resp = requests.post(
         ASSESS_URL,
@@ -141,7 +144,9 @@ def compute_assessment(call_log_entries: list, logic_data: dict, emergencies: li
     # serve/assess.py는 통화 시각을 모르니 measured_at을 항상 None으로 두고
     # "worker.py가 채운다"고 위임한다 — 그 계약을 여기서 이행한다.
     assessment["measured_at"] = measured_at
-    return assessment, data.get("adherence_records", [])
+    # incomplete_categories는 척도 판정(logic_data) 기준이라 통화 흐름 기준인
+    # entry 쪽 값보다 정확하다 — 얹혀 있으면 그대로 쓴다(빈 리스트도 유효한 값).
+    return assessment, data.get("adherence_records", []), data.get("incomplete_categories", [])
 
 
 def load_call_result_processed() -> set[str]:
@@ -171,10 +176,14 @@ def pending_call_results() -> list[dict]:
 
 
 def push_call_result(entry: dict) -> None:
-    assessment, adherence_records = compute_assessment(
+    assessment, adherence_records, incomplete_categories = compute_assessment(
         entry["call_log_entries"], entry["logic_data"], entry["emergencies"],
         entry["call_log"]["ended_at"],
     )
+    if incomplete_categories is None:
+        # 채점 서비스 미연동(placeholder) 경로 — entry 쪽 값으로 대체.
+        # 이 필드 없는 예전 outbox 항목과도 하위호환.
+        incomplete_categories = entry.get("incomplete_categories", [])
     payload = {
         "recipient_id": entry["recipient_id"],
         "call_log": entry["call_log"],
@@ -182,7 +191,7 @@ def push_call_result(entry: dict) -> None:
         "assessment": assessment,
         "adherence_records": adherence_records,
         "profile_updates": entry["profile_updates"],  # Spring 원본 스펙엔 없는 확장 필드 — 조율 필요
-        "incomplete_categories": entry.get("incomplete_categories", []),  # 이 필드 없는 예전 outbox 항목과 하위호환
+        "incomplete_categories": incomplete_categories,
     }
     resp = requests.post(
         f"{SPRING_BASE_URL}/internal/call-results",
