@@ -48,7 +48,15 @@ async def _send_emergency_alert_now(state: dict, signal: str) -> bool:
         log.exception("emergency alert POST to Spring failed — falling back to file queue")
         return False
 
-    if not await sms.send_emergency_sms_async(data["guardian_phone_number"], data["recipient_name"], signal):
+    phone = data.get("guardian_phone_number")
+    if not phone:
+        # 보호자가 위급상황 알림을 꺼뒀으면 Spring이 이 필드를 비워서 응답한다 — 정상적인
+        # "문자 안 보냄"이지 실패가 아니다. None으로 그대로 보내면 ClawOps가 거부해서
+        # 진짜 실패처럼 로그가 남는다.
+        log.info("guardian opted out of emergency alerts — skipping SMS")
+        return True
+
+    if not await sms.send_emergency_sms_async(phone, data["recipient_name"], signal):
         log.warning("guardian emergency SMS failed (dashboard notification already filed)")
     return True
 

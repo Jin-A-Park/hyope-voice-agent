@@ -52,9 +52,15 @@ def push_guardian_alert(alert: dict) -> None:
     resp.raise_for_status()
     data = resp.json()
 
+    phone = data.get("guardian_phone_number")
+    if not phone:
+        # 보호자가 위급상황 알림을 꺼둔 경우 — 정상적인 "문자 안 보냄"이라 에러가 아니다.
+        log.info("guardian opted out of emergency alerts — skipping SMS: %s", alert["id"])
+        return
+
     # SMS 실패는 raise하지 않는다 — 대시보드 알림은 이미 생성됐으므로, SMS만 재시도하겠다고
     # 이 함수 전체를 재시도하면 Spring 쪽 알림이 매번 중복 생성된다.
-    if not sms.send_emergency_sms(data["guardian_phone_number"], data["recipient_name"], alert["alert"]):
+    if not sms.send_emergency_sms(phone, data["recipient_name"], alert["alert"]):
         log.warning("guardian emergency SMS failed (dashboard notification already filed): %s", alert["id"])
 
 
