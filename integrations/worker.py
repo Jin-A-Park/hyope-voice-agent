@@ -130,7 +130,7 @@ def _placeholder_assessment(reason: str, measured_at: str) -> tuple[dict, list]:
     }, []
 
 
-def compute_assessment(call_log_entries: list, logic_data: dict, emergencies: list, measured_at: str) -> tuple[dict, list, list | None]:
+def compute_assessment(call_log_entries: list, logic_data: dict, emergencies: list, measured_at: str, item_judgments: dict | None = None) -> tuple[dict, list, list | None]:
     """채점 서비스(hyope-ai serve/)에 위임한다.
 
     ASSESS_URL이 없으면 예전처럼 placeholder를 반환한다. 채점 서비스 없이도
@@ -151,7 +151,8 @@ def compute_assessment(call_log_entries: list, logic_data: dict, emergencies: li
         ASSESS_URL,
         json={"call_log_entries": call_log_entries,
               "logic_data": logic_data,
-              "emergencies": emergencies},
+              "emergencies": emergencies,
+              "item_judgments": item_judgments or {}},
         timeout=ASSESS_TIMEOUT,
     )
     resp.raise_for_status()
@@ -194,7 +195,7 @@ def pending_call_results() -> list[dict]:
 def push_call_result(entry: dict) -> None:
     assessment, adherence_records, incomplete_categories = compute_assessment(
         entry["call_log_entries"], entry["logic_data"], entry["emergencies"],
-        entry["call_log"]["ended_at"],
+        entry["call_log"]["ended_at"], entry.get("item_judgments", {}),
     )
     if incomplete_categories is None:
         # 채점 서비스 미연동(placeholder) 경로 — entry 쪽 값으로 대체.

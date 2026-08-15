@@ -296,6 +296,7 @@ def log_answer_analysis(
         reason = f"(서버가 실제 날짜와 대조) {reason}"
 
     state["logic_data"][category] = {"judgment": assessment, "reason": reason}
+    state["item_judgments"][question_id] = {"judgment": assessment, "reason": reason}
     state["asked_order"].append(question_id)
 
     if category == "취미/근황" and assessment in ("우려", "위급"):

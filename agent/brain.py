@@ -38,6 +38,9 @@ def new_call_state(question_bank: dict) -> dict:
     return {
         "_question_bank": question_bank,
         "logic_data": {},         # category(KR) -> {"judgment", "reason"}, filled by log_answer_analysis
+        "item_judgments": {},     # question_id -> {"judgment", "reason"}, filled by log_answer_analysis —
+                                   # logic_data와 달리 문항 단위라, "복약/식사" 카테고리처럼 한 카테고리
+                                   # 안에 문항이 여럿이어도(medication/meal) 서로 덮어쓰지 않는다.
         "emergencies": [],        # [{"signal", "severity", "flagged_at"}, ...], filled by flag_emergency
         "asked_questions": {},    # category(KR) -> {question_id, ...} already asked this call
         "completed_categories": set(),  # category(KR) done (good, or its questions ran out)
@@ -215,6 +218,7 @@ def write_call_result_outbox(state: dict, status: str) -> None:
             },
             "call_log_entries": state["call_log_entries"],
             "logic_data": state["logic_data"],
+            "item_judgments": state["item_judgments"],
             "emergencies": state["emergencies"],
             "profile_updates": state["profile_updates"],
             "incomplete_categories": incomplete_categories,
