@@ -52,6 +52,9 @@ def new_call_state(call_id: str, profile: dict | None) -> dict:
     return {
         "_stage_buffer": stages.get_or_create_buffer(call_id, profile),
         "logic_data": {},         # stage_type(value) -> {"judgment", "reason"}, filled by check_in
+        "item_judgments": {},     # question_id -> {"judgment", "reason"}, filled by check_in — 문항
+                                   # 단위라 "medication_entry"/"meal_entry"처럼 같은 스테이지 안 문항이
+                                   # 여럿이어도 서로 안 덮어씀. serve/assess.py의 복약/식사 이행 판단용.
         "emergencies": [],        # [{"stage", "severity", "flagged_at"}, ...], filled by check_in(discomfort spawn, severity=high)
         "profile_updates": [],    # [{"action","kind","text"|"hobby_name"|"event_id","reason"}, ...] — filled by
                                    # update_recipient_profile, pushed to Spring at call end, next-call-only
@@ -98,6 +101,7 @@ def write_call_result_outbox(state: dict, status: str) -> None:
             },
             "call_log_entries": state["call_log_entries"],
             "logic_data": state["logic_data"],
+            "item_judgments": state.get("item_judgments") or {},
             "emergencies": state["emergencies"],
             "profile_updates": state["profile_updates"],
             "incomplete_categories": incomplete_categories,

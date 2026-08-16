@@ -569,6 +569,13 @@ def check_in(
     stage_state = buffer.current()
 
     state["logic_data"][stage_type.value] = {"judgment": assessment, "reason": reason}
+    # * logic_data와 별개로 문항(question_id) 단위로도 남긴다 — 카테고리 단위인 logic_data와 달리,
+    # * "복약/식사"처럼 한 카테고리 안에 문항이 여럿(medication_entry/meal_entry)이어도 서로 안
+    # * 덮어쓴다. serve/assess.py의 _adherence()가 이 필드로 복약/식사 이행 여부를 판단한다.
+    if stage_state.current_question is not None:
+        state.setdefault("item_judgments", {})[stage_state.current_question.id] = {
+            "judgment": assessment, "reason": reason,
+        }
 
     # 3) 판정 -> level 전이
     # closing은 다른 스테이지와 다르게 다룬다 — "더 궁금한 점 있으세요?"에 "없어요"(문제없음)가
