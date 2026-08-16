@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from agent import stages
+from agent import stages, tools
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -88,6 +88,11 @@ def write_call_result_outbox(state: dict, status: str) -> None:
     incomplete_categories = [
         s.stage.value for s in buffer.stages.values() if s.level != stages.StageLevel.COMPLETED
     ]
+
+    # ANXIETY/COGNITIVE처럼 반응형이라 한 번도 안 뜬 카테고리는, 짝이 되는 baseline
+    # 카테고리(HEALTH/DEPRESSION)의 겸용 스크리닝 문항이 문제없음으로 끝났다면 "못 물어봤다"가
+    # 아니라 "간접 스크리닝에서 이상 없었다"는 뜻이다 — serve/Spring으로 나가기 직전에 반영한다.
+    tools.backfill_implicit_screening(state["logic_data"])
 
     CALL_RESULT_OUTBOX.parent.mkdir(parents=True, exist_ok=True)
     with open(CALL_RESULT_OUTBOX, "a") as f:

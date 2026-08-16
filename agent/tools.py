@@ -254,6 +254,31 @@ def _write_dashboard_alert(state: dict, stage_state: stages.StageState) -> None:
     })
 
 
+# DEPRESSION/HEALTH의 entry 질문은 우울+인지, 건강+불안을 겸해서 스크리닝하도록 설계됐다
+# (agent/stages.py의 INITIAL_PRIORITY 주석 참고) — COGNITIVE/ANXIETY는 반응형(discomfort_flags로만
+# 스폰)이라 한 번도 안 뜨면 logic_data에 기록이 아예 없다. 이걸 무조건 "미확인"으로 두면
+# 안 된다 — 짝이 되는 카테고리가 결국 "문제없음"으로 끝났다면 그건 "못 물어봤다"가 아니라
+# "간접 스크리닝에서 이상 없었다"는 뜻이다. 통화 종료 시 문제없음으로 소급 반영한다.
+_IMPLICIT_SCREEN_PAIR: dict[stages.StageType, stages.StageType] = {
+    stages.StageType.COGNITIVE: stages.StageType.DEPRESSION,
+    stages.StageType.ANXIETY: stages.StageType.HEALTH,
+}
+
+
+def backfill_implicit_screening(logic_data: dict) -> None:
+    # * agent/brain.py의 write_call_result_outbox가 Spring/serve로 보내기 직전에 호출한다 —
+    # * 통화 도중에 하면 안 된다(나중 턴에 진짜 discomfort_flag가 뜰 여지를 미리 닫아버리면 안 됨).
+    for reactive, baseline in _IMPLICIT_SCREEN_PAIR.items():
+        if reactive.value in logic_data:
+            continue  # 실제로 반응형 신호가 떠서 이미 판정된 경우 — 건드리지 않는다
+        baseline_judgment = (logic_data.get(baseline.value) or {}).get("judgment")
+        if baseline_judgment == "문제없음":
+            logic_data[reactive.value] = {
+                "judgment": "문제없음",
+                "reason": f"{_stage_label(baseline)} 문항에서 겸해서 스크리닝됨 — 신호 없음",
+            }
+
+
 # --------------------------------------------------------------------------
 # 1. 다음 스테이지/질문 선택 — check_in의 부트스트랩/일반 판정 경로가 공유한다.
 # --------------------------------------------------------------------------
