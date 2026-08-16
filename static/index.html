@@ -48,10 +48,7 @@
   }
   #reset:hover { color: var(--text); border-color: var(--dim); }
 
-  #log {
-    width: 100%; max-width: 40rem; margin-top: 2rem; display: flex; flex-direction: column; gap: .6rem;
-    max-height: 45vh; overflow-y: auto; padding-right: .3rem; scroll-behavior: smooth;
-  }
+  #log { width: 100%; max-width: 40rem; margin-top: 2rem; display: flex; flex-direction: column; gap: .6rem; }
   .msg { display: flex; flex-direction: column; max-width: 80%; }
   .msg.elder { align-self: flex-end; align-items: flex-end; }
   .msg.agent { align-self: flex-start; align-items: flex-start; }
@@ -88,7 +85,7 @@
   <div id="status">Loading…</div>
 
   <select id="model">
-    <option value="">xAI (grok-voice-think-fast-2.0, 기본값)</option>
+    <option value="">xAI (grok-voice-latest, 기본값)</option>
     <option value="gemini-3.1-flash-live-preview">Gemini Live (gemini-3.1-flash-live-preview)</option>
   </select>
 
@@ -109,7 +106,7 @@
     <div class="field">
       <label for="fPhone">전화번호 (SMS 발송 테스트용)</label>
       <input id="fPhone" type="tel" placeholder="01012345678">
-      <div class="hint">입력하면 send_resource_info 호출 시 이 번호로 실제 문자가 발송됩니다.</div>
+      <div class="hint">입력하면 check_external_api_necessity가 문자 발송을 요청할 때 이 번호로 실제 문자가 발송됩니다.</div>
     </div>
   </details>
 
@@ -285,10 +282,6 @@ function startCall() {
   $("model").disabled = true;
   status("연결 중…");
 
-  $("log").innerHTML = "";
-  currentAgentBubble = null;
-  currentElderBubble = null;
-
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const model = $("model").value;
   const qs = model ? `?model=${encodeURIComponent(model)}` : "";
@@ -329,6 +322,7 @@ function handleServerMessage(msg) {
       break;
     case "turn_done":
       currentAgentBubble = null;
+      currentElderBubble = null;
       break;
     case "call_ended":
       status("통화가 종료되었습니다.");
@@ -354,19 +348,7 @@ function bubbleFor(role) {
   return div;
 }
 
-// 사용자가 이력을 보려고 위로 스크롤해둔 상태면 새 메시지가 와도 방해하지 않고,
-// 이미 맨 아래(최신)를 보고 있던 경우에만 자동으로 따라 내려간다.
-function isLogNearBottom() {
-  const log = $("log");
-  return log.scrollHeight - log.scrollTop - log.clientHeight < 40;
-}
-
-function stickLogToBottom(wasNearBottom) {
-  if (wasNearBottom) $("log").scrollTop = $("log").scrollHeight;
-}
-
 function appendTranscript(role, delta, fullText) {
-  const wasNearBottom = isLogNearBottom();
   const div = bubbleFor(role);
   const bubble = div.querySelector(".bubble");
   if (fullText !== undefined && fullText !== null) {
@@ -375,11 +357,10 @@ function appendTranscript(role, delta, fullText) {
   } else {
     bubble.textContent += delta ?? "";
   }
-  stickLogToBottom(wasNearBottom);
+  $("log").scrollTop = $("log").scrollHeight;
 }
 
 function addToolChip(name) {
-  const wasNearBottom = isLogNearBottom();
   let holder = $("log").lastElementChild;
   let tools = holder && holder.classList.contains("tools") ? holder : null;
   if (!tools) {
@@ -390,16 +371,14 @@ function addToolChip(name) {
   const chip = document.createElement("span");
   chip.textContent = "🔧 " + name;
   tools.appendChild(chip);
-  stickLogToBottom(wasNearBottom);
+  $("log").scrollTop = $("log").scrollHeight;
 }
 
 function addError(message) {
-  const wasNearBottom = isLogNearBottom();
   const div = document.createElement("div");
   div.className = "err";
   div.textContent = message;
   $("log").appendChild(div);
-  stickLogToBottom(wasNearBottom);
 }
 
 init();

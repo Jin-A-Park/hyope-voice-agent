@@ -1,6 +1,5 @@
-# 주소 -> 좌표 -> 주변 노인복지 시설 검색(카카오 로컬 API). integrations/dispatch.py의
-# dispatch_tool()이 flag_emergency 호출을 가로채서, 실제로 nearby_resource가 필요한 상황
-# (severity != high, 학대/정신건강/응급이 아닌 일반적인 도움 요청)일 때만 이 모듈을 불러 조회한다
+# 주소 -> 좌표 -> 주변 시설 검색(카카오 로컬 API). integrations/dispatch.py의 dispatch_tool()이
+# check_external_api_necessity 호출을 가로채서, keyword가 있을 때만 이 모듈을 불러 조회한다
 # — agent/ 쪽은 네트워킹 금지 원칙이라 여기(네트워킹 계층)에서 미리 해결해서 값만 넘긴다.
 from __future__ import annotations
 
