@@ -431,10 +431,13 @@ async def _pump_upstream(upstream, sink: OutputSink, state: dict, session_id: st
                     response_had_audio = False
                 # 모델이 이 결과를 받고 이어서 말할 걸로 예상되는 경우에만 필러를 대기시킨다 —
                 # update_recipient_profile처럼 next_step이 없는 툴(조용히 기록만 함)은 대상 아님.
-                # 이미 대기 중인 필러가 있으면(짧은 시간 안에 툴이 연달아 불린 경우) 새로 하나로
-                # 교체한다 — 필러가 겹쳐서 두 번 들리면 안 되니까.
-                _cancel_filler(pending_filler_task)
-                pending_filler_task = asyncio.create_task(_play_filler_after_delay(sink, FILLER_DELAY_S))
+                # start_call(통화의 첫 툴 호출, 아직 인사말도 안 나간 시점)도 제외한다 — 대화가
+                # 시작되기도 전에 낯선 소리부터 나가면 오히려 어색하다. 이미 대기 중인 필러가
+                # 있으면(짧은 시간 안에 툴이 연달아 불린 경우) 새로 하나로 교체한다 — 필러가
+                # 겹쳐서 두 번 들리면 안 되니까.
+                if name != "start_call":
+                    _cancel_filler(pending_filler_task)
+                    pending_filler_task = asyncio.create_task(_play_filler_after_delay(sink, FILLER_DELAY_S))
             timing["tool_called"] = t_called
 
             await sink.send_event({"type": "tool_used", "name": name})
