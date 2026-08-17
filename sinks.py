@@ -12,6 +12,14 @@ from fastapi import WebSocket
 # xAI는 24kHz, Gemini 입력은 16kHz로 서로 달라 call_media_to_pcm16k/24k로 나뉜다.
 # --------------------------------------------------------------------------
 
+def call_media_rms(b64_ulaw: str) -> int:
+    # * μ-law 청크 하나의 RMS(음량 에너지) — server.py가 통화 연결 직후, 인사말을 시작하기 전
+    # * 짧게 주변 소음을 재서 VAD threshold를 세션별로 보정하는 데 쓴다.
+    ulaw = base64.b64decode(b64_ulaw)
+    pcm = audioop.ulaw2lin(ulaw, 2)
+    return audioop.rms(pcm, 2)
+
+
 def call_media_to_pcm24k(b64_ulaw: str, state) -> tuple[str, object]:
     # * 전화가 보낸 μ-law 8kHz 청크를 xAI Realtime이 기대하는 PCM16 24kHz로.
     ulaw = base64.b64decode(b64_ulaw)

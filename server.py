@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 
 from agent import brain, prompts, tools as agent_tools
 from integrations import dispatch, worker
-from sinks import OutputSink, BrowserSink, CallSink, call_media_to_pcm24k
+from sinks import OutputSink, BrowserSink, CallSink, call_media_rms, call_media_to_pcm24k
 
 import gemini_loader
 
@@ -86,15 +86,64 @@ def check_internal_key(x_api_key: str | None) -> None:
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
-def turn_detection_config() -> dict:
+def turn_detection_config(threshold: float | None = None) -> dict:
     # * xAI Realtime의 server_vad 설정 — 어르신 통화 특성상 .env에서 "patient"하게 튜닝된 값.
+    # * threshold를 넘기면 .env의 VAD_THRESHOLD 대신 그 값을 쓴다 — 통화별 주변 소음 보정용
+    # * (_calibrate_vad_threshold 참고). 안 넘기면(브라우저 데모 등) 기존처럼 고정값을 쓴다.
     return {
         "type": "server_vad",
-        "threshold": float(os.environ.get("VAD_THRESHOLD", "0.5")),
+        "threshold": threshold if threshold is not None else float(os.environ.get("VAD_THRESHOLD", "0.5")),
         "prefix_padding_ms": int(os.environ.get("PREFIX_MS", "300")),
-        "silence_duration_ms": int(os.environ.get("SILENCE_MS", "900")),
+        "silence_duration_ms": int(os.environ.get("SILENCE_MS", "750")),
         "idle_timeout_ms": int(os.environ.get("IDLE_TIMEOUT_MS", "30000")),
     }
+
+
+# _calibrate_vad_threshold의 보정 범위 — 검증된 기본값(VAD_THRESHOLD=0.5)에서 너무 멀리 벗어나면
+# 오탐/미탐 위험이 커지므로, 측정한 주변 소음과 무관하게 이 범위 밖으로는 안 나가게 막는다.
+# 절대적인 보정 공식이 아니라 시작점이다 — 실제 통화로 재보면서 재조정이 필요할 수 있다.
+_VAD_THRESHOLD_MIN = 0.35
+_VAD_THRESHOLD_MAX = 0.65
+# 이 RMS(대략적인 조용한 방~약간 시끄러운 방 범위) 구간에서 위 min/max로 선형 보간한다.
+_QUIET_RMS = 150
+_NOISY_RMS = 1500
+_CALIBRATION_TIMEOUT_S = 0.8  # 이 안에 충분한 샘플을 못 모으면 그냥 기본값(0.5)으로 넘어간다
+
+
+async def _calibrate_vad_threshold(client_ws: WebSocket) -> float:
+    # * 통화 연결 직후, 인사말을 시작하기 전 아주 짧게(최대 0.8초) 전화선 오디오를 들어서 주변
+    # * 소음 수준을 재고 VAD threshold를 세션별로 보정한다 — 이 구간의 오디오는 모델에 전달하지
+    # * 않고 버린다(아직 인사도 안 나갔으니 어르신 발화가 담겨있을 가능성이 거의 없다). 실패하거나
+    # * 샘플이 부족하면 기존 고정 기본값(0.5)으로 조용히 넘어간다 — 이 보정은 있으면 좋은 것이지
+    # * 통화 진행의 필수 조건이 아니다.
+    samples: list[int] = []
+    try:
+        async def _collect():
+            while True:
+                event = await client_ws.receive_json()
+                if event.get("event") == "media":
+                    samples.append(call_media_rms(event["media"]["payload"]))
+                elif event.get("event") == "stop":
+                    return
+        await asyncio.wait_for(_collect(), timeout=_CALIBRATION_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        pass
+    except Exception:
+        log.exception("VAD 보정 중 오류 — 기본값으로 진행")
+
+    if len(samples) < 5:  # 너무 적으면 노이즈 추정이 신뢰할 수 없다
+        log.info("VAD 보정: 샘플 부족(%d개) — 기본값 0.5 사용", len(samples))
+        return 0.5
+
+    avg_rms = sum(samples) / len(samples)
+    ratio = (avg_rms - _QUIET_RMS) / (_NOISY_RMS - _QUIET_RMS)
+    ratio = max(0.0, min(1.0, ratio))
+    threshold = _VAD_THRESHOLD_MIN + ratio * (_VAD_THRESHOLD_MAX - _VAD_THRESHOLD_MIN)
+    log.info(
+        "VAD 보정: 샘플 %d개, 평균 RMS %.0f -> threshold %.2f",
+        len(samples), avg_rms, threshold,
+    )
+    return threshold
 
 # --------------------------------------------------------------------------
 # call bridge (sink / 오디오 트랜스코딩 / pump 루프 — 브라우저·전화 공통)
@@ -532,6 +581,10 @@ async def call_stream_ws(client_ws: WebSocket) -> None:
             ok = await gemini_loader.run_session(client_ws, state, model, session_id)
             status = "COMPLETED" if ok else "FAILED"
         else:
+            # 인사말이 나가기 전 아주 짧게 전화선 소음을 재서 이번 통화의 VAD threshold를 보정한다
+            # (조용한 집/시끄러운 환경에 따라 오탐지 위험이 다르므로) — xAI 세션을 열기 전에 해야
+            # 그 결과를 session.update에 바로 실을 수 있다.
+            vad_threshold = await _calibrate_vad_threshold(client_ws)
             async with websockets.connect(
                 realtime_url(model),
                 additional_headers={"Authorization": f"Bearer {require_env('XAI_API_KEY')}"},
@@ -541,7 +594,7 @@ async def call_stream_ws(client_ws: WebSocket) -> None:
                     "session": {
                         "voice": os.environ.get("TTS_VOICE", "ara"),
                         "instructions": prompts.IDENTITY_PROMPT,
-                        "turn_detection": turn_detection_config(),
+                        "turn_detection": turn_detection_config(vad_threshold),
                         "input_audio_format": "pcm16",
                         "output_audio_format": "pcm16",
                         "tools": agent_tools.build_tools(),
