@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import os
+import random
 import threading
 import time
 import uuid
@@ -186,6 +187,32 @@ def public_base_url() -> str:
 # 배포를 전제로 한 인메모리 저장(다른 상태 저장과 동일한 방식).
 PENDING_CALL_METADATA: dict[str, dict] = {}
 
+# --------------------------------------------------------------------------
+# 필러(backchannel) 오디오 — 툴 호출 후 모델의 다음 응답이 늦어질 때(추론 지연) 침묵 대신
+# 짧게 재생해서 통화가 끊긴 것처럼 느껴지지 않게 한다. static/fillers/*.b64는
+# scratchpad/gen_fillers.py로 실제 통화 목소리(.env의 TTS_VOICE)에 맞춰 미리 합성해둔
+# PCM16 24kHz 원본이다 — 모델과 무관하게 서버가 직접 재생하므로 "말하기 전에 함수부터
+# 호출하라"는 기존 지시(중복 발화 방지)와 충돌하지 않는다.
+FILLER_CLIPS: list[str] = []
+_fillers_dir = ROOT / "static" / "fillers"
+if _fillers_dir.exists():
+    for _p in sorted(_fillers_dir.glob("*.b64")):
+        FILLER_CLIPS.append(_p.read_text().strip())
+
+FILLER_DELAY_S = 0.45  # 이 안에 모델의 진짜 응답 오디오가 안 오면 필러를 재생한다
+
+
+async def _play_filler_after_delay(sink: OutputSink, delay: float) -> None:
+    await asyncio.sleep(delay)
+    if FILLER_CLIPS:
+        await sink.send_audio(random.choice(FILLER_CLIPS))
+
+
+def _cancel_filler(task: asyncio.Task | None) -> None:
+    if task is not None and not task.done():
+        task.cancel()
+
+
 async def _pump_downstream(client_ws: WebSocket, upstream) -> None:
     # * 브라우저(/ws/browser)에서 받아온 데이터 -> 모델
 
@@ -253,6 +280,10 @@ async def _pump_upstream(upstream, sink: OutputSink, state: dict, session_id: st
     # 동일한 현상) — call_id 기준으로 한 번만 처리해서 같은 툴이 중복 실행/중복 응답되는 걸 막는다.
     _handled_call_ids: set[str] = set()
 
+    # 툴 호출 후 모델의 다음 응답(진짜 음성)이 FILLER_DELAY_S 안에 안 오면 필러를 재생한다 —
+    # 진짜 오디오가 시작되거나 응답이 끝나면 아직 안 울린 필러는 취소한다.
+    pending_filler_task: asyncio.Task | None = None
+
     # 지연시간 계측: 구간 시작 시각만 들고 있다가, 그 구간을 끝내는 이벤트가 오면
     # 그 시각과의 차이를 ms로 로그에 남긴다(perf_counter라 단조 증가만 보장하면 됨).
     timing = {
@@ -274,6 +305,7 @@ async def _pump_upstream(upstream, sink: OutputSink, state: dict, session_id: st
 
     def _mark_answer_started() -> None:
         """response.output_audio(.transcript).delta가 오는 시점 = LLM 답변 생성 시작."""
+        _cancel_filler(pending_filler_task)  # 진짜 응답이 시작됐으니 대기 중인 필러는 취소
         if timing["tool_called"] is None:
             return
         elapsed_ms = (time.perf_counter() - timing["tool_called"]) * 1000
@@ -397,6 +429,12 @@ async def _pump_upstream(upstream, sink: OutputSink, state: dict, session_id: st
                 response_pending = True
                 if name != "end_call":
                     response_had_audio = False
+                # 모델이 이 결과를 받고 이어서 말할 걸로 예상되는 경우에만 필러를 대기시킨다 —
+                # update_recipient_profile처럼 next_step이 없는 툴(조용히 기록만 함)은 대상 아님.
+                # 이미 대기 중인 필러가 있으면(짧은 시간 안에 툴이 연달아 불린 경우) 새로 하나로
+                # 교체한다 — 필러가 겹쳐서 두 번 들리면 안 되니까.
+                _cancel_filler(pending_filler_task)
+                pending_filler_task = asyncio.create_task(_play_filler_after_delay(sink, FILLER_DELAY_S))
             timing["tool_called"] = t_called
 
             await sink.send_event({"type": "tool_used", "name": name})
