@@ -202,10 +202,14 @@ if _fillers_dir.exists():
 FILLER_DELAY_S = 0.45  # 이 안에 모델의 진짜 응답 오디오가 안 오면 필러를 재생한다
 
 
-async def _play_filler_after_delay(sink: OutputSink, delay: float) -> None:
+async def _play_filler_after_delay(sink: OutputSink, delay: float, session_id: str) -> None:
     await asyncio.sleep(delay)
     if FILLER_CLIPS:
-        await sink.send_audio(random.choice(FILLER_CLIPS))
+        i = random.randrange(len(FILLER_CLIPS))
+        # * 실제로 몇 번째 clip이 골라졌는지 남긴다 — random.choice가 매번 진짜 무작위로 도는지
+        # * (특정 clip만 반복되는 건 아닌지) 로그로 바로 확인할 수 있게.
+        log.info("[%s] 필러 재생: clip #%d/%d", session_id, i + 1, len(FILLER_CLIPS))
+        await sink.send_audio(FILLER_CLIPS[i])
 
 
 def _cancel_filler(task: asyncio.Task | None) -> None:
@@ -431,13 +435,15 @@ async def _pump_upstream(upstream, sink: OutputSink, state: dict, session_id: st
                     response_had_audio = False
                 # 모델이 이 결과를 받고 이어서 말할 걸로 예상되는 경우에만 필러를 대기시킨다 —
                 # update_recipient_profile처럼 next_step이 없는 툴(조용히 기록만 함)은 대상 아님.
-                # start_call(통화의 첫 툴 호출, 아직 인사말도 안 나간 시점)도 제외한다 — 대화가
-                # 시작되기도 전에 낯선 소리부터 나가면 오히려 어색하다. 이미 대기 중인 필러가
-                # 있으면(짧은 시간 안에 툴이 연달아 불린 경우) 새로 하나로 교체한다 — 필러가
-                # 겹쳐서 두 번 들리면 안 되니까.
-                if name != "start_call":
+                # start_call(아직 인사말도 안 나간 시점 — 대화 시작 전에 낯선 소리부터 나가면
+                # 어색함)과 end_call(작별 인사 중 — 끊기 직전에 필러가 끼어들면 안 됨)도 제외한다.
+                # 이미 대기 중인 필러가 있으면(짧은 시간 안에 툴이 연달아 불린 경우) 새로 하나로
+                # 교체한다 — 필러가 겹쳐서 두 번 들리면 안 되니까.
+                if name not in ("start_call", "end_call"):
                     _cancel_filler(pending_filler_task)
-                    pending_filler_task = asyncio.create_task(_play_filler_after_delay(sink, FILLER_DELAY_S))
+                    pending_filler_task = asyncio.create_task(
+                        _play_filler_after_delay(sink, FILLER_DELAY_S, session_id)
+                    )
             timing["tool_called"] = t_called
 
             await sink.send_event({"type": "tool_used", "name": name})
