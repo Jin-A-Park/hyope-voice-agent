@@ -53,6 +53,8 @@ def push_guardian_alert(alert: dict) -> None:
     data = resp.json()
 
     phone = data.get("guardian_phone_number")
+    if phone:
+        phone = phone.replace("-", "").replace(" ", "")
     if not phone:
         # 보호자가 위급상황 알림을 꺼둔 경우 — 정상적인 "문자 안 보냄"이라 에러가 아니다.
         log.info("guardian opted out of emergency alerts — skipping SMS: %s", alert["id"])

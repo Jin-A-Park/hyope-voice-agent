@@ -56,6 +56,8 @@ async def _send_emergency_alert_now(state: dict, alert: dict) -> bool:
         return False
 
     phone = data.get("guardian_phone_number")
+    if phone:
+        phone = phone.replace("-", "").replace(" ", "")
     if not phone:
         # 보호자가 위급상황 알림을 꺼뒀으면 Spring이 이 필드를 비워서 응답한다 — 정상적인
         # "문자 안 보냄"이지 실패가 아니다.
