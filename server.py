@@ -111,12 +111,14 @@ _NOISY_RMS = 1500
 _CALIBRATION_TIMEOUT_S = 0.8  # 이 안에 충분한 샘플을 못 모으면 그냥 기본값(0.5)으로 넘어간다
 
 
-async def _calibrate_vad_threshold(client_ws: WebSocket) -> float:
+async def _calibrate_vad_threshold(client_ws: WebSocket) -> tuple[float, float]:
     # * 통화 연결 직후, 인사말을 시작하기 전 아주 짧게(최대 0.8초) 전화선 오디오를 들어서 주변
     # * 소음 수준을 재고 VAD threshold를 세션별로 보정한다 — 이 구간의 오디오는 모델에 전달하지
     # * 않고 버린다(아직 인사도 안 나갔으니 어르신 발화가 담겨있을 가능성이 거의 없다). 실패하거나
     # * 샘플이 부족하면 기존 고정 기본값(0.5)으로 조용히 넘어간다 — 이 보정은 있으면 좋은 것이지
     # * 통화 진행의 필수 조건이 아니다.
+    # * 반환값 (threshold, ambient_rms) — ambient_rms는 _LocalEndpointDetector가 발화 여부를
+    # * 판단할 때 재사용한다(같은 측정을 두 번 안 하도록).
     samples: list[int] = []
     try:
         async def _collect():
@@ -134,7 +136,7 @@ async def _calibrate_vad_threshold(client_ws: WebSocket) -> float:
 
     if len(samples) < 5:  # 너무 적으면 노이즈 추정이 신뢰할 수 없다
         log.info("VAD 보정: 샘플 부족(%d개) — 기본값 0.5 사용", len(samples))
-        return 0.5
+        return 0.5, float(_QUIET_RMS)
 
     avg_rms = sum(samples) / len(samples)
     ratio = (avg_rms - _QUIET_RMS) / (_NOISY_RMS - _QUIET_RMS)
@@ -144,7 +146,42 @@ async def _calibrate_vad_threshold(client_ws: WebSocket) -> float:
         "VAD 보정: 샘플 %d개, 평균 RMS %.0f -> threshold %.2f",
         len(samples), avg_rms, threshold,
     )
-    return threshold
+    return threshold, avg_rms
+
+
+# --------------------------------------------------------------------------
+# 수동 turn_detection(로컬 발화 종료 감지) — Gemini Live의 hybrid VAD와 같은 아이디어: 서버(xAI)가
+# 자체 server_vad 타이머로 "어르신이 말을 끝냈는지" 판단하길 기다리지 않고, 우리가 들어오는 오디오를
+# 직접 보고 있다가 먼저 판단해서 곧바로 input_audio_buffer.commit + response.create를 보낸다.
+# 발화 "시작" 감지는 여전히 안 한다(복잡도/오탐 위험이 큰 부분) — 그냥 에너지가 임계값을 넘긴
+# 순간부터 "말하고 있다"로 치고, 그 뒤 일정 시간 조용하면 끝난 걸로 본다.
+# --------------------------------------------------------------------------
+
+MANUAL_TURN_DETECTION = os.environ.get("MANUAL_TURN_DETECTION", "false").strip().lower() == "true"
+_LOCAL_SILENCE_S = int(os.environ.get("SILENCE_MS", "750")) / 1000
+_LOCAL_SPEECH_MULTIPLIER = 2.5  # 주변 소음 대비 이 배수 이상이면 "말하고 있다"로 본다
+
+
+class _LocalEndpointDetector:
+    def __init__(self, ambient_rms: float):
+        self.speech_rms = max(ambient_rms * _LOCAL_SPEECH_MULTIPLIER, _QUIET_RMS * _LOCAL_SPEECH_MULTIPLIER)
+        self._had_speech = False
+        self._last_speech_at: float | None = None
+
+    def feed(self, rms: int) -> bool:
+        # * 오디오 청크 하나(rms)를 넣고, 지금이 턴을 끊을 시점이면(발화 후 충분히 조용해졌으면) True.
+        now = time.monotonic()
+        if rms >= self.speech_rms:
+            self._had_speech = True
+            self._last_speech_at = now
+            return False
+        if self._had_speech and self._last_speech_at is not None:
+            if now - self._last_speech_at >= _LOCAL_SILENCE_S:
+                self._had_speech = False
+                self._last_speech_at = None
+                return True
+        return False
+
 
 # --------------------------------------------------------------------------
 # call bridge (sink / 오디오 트랜스코딩 / pump 루프 — 브라우저·전화 공통)
@@ -232,8 +269,15 @@ async def _pump_downstream(client_ws: WebSocket, upstream) -> None:
         elif kind == "hangup":
             return
 
-async def _pump_downstream_call(client_ws: WebSocket, upstream, state: dict) -> None:
+async def _pump_downstream_call(
+    client_ws: WebSocket, upstream, state: dict, ambient_rms: float, session_id: str,
+) -> None:
     # * 통화 스트림(/ws/call-stream)에서 받아온 데이터 -> 오디오 포맷 변환 -> 모델
+    # * MANUAL_TURN_DETECTION이면 여기서 직접 발화 종료를 감지해 xAI의 server_vad 타이머를
+    # * 기다리지 않고 곧바로 input_audio_buffer.commit + response.create를 보낸다(Gemini Live의
+    # * hybrid VAD와 같은 아이디어 — _LocalEndpointDetector 정의부 주석 참고).
+
+    detector = _LocalEndpointDetector(ambient_rms) if MANUAL_TURN_DETECTION else None
 
     resample_state = None
     while True:
@@ -241,11 +285,22 @@ async def _pump_downstream_call(client_ws: WebSocket, upstream, state: dict) -> 
         etype = event.get("event")
 
         if etype == "media":
-            b64_pcm16, resample_state = call_media_to_pcm24k(event["media"]["payload"], resample_state)
+            payload = event["media"]["payload"]
+            b64_pcm16, resample_state = call_media_to_pcm24k(payload, resample_state)
             await upstream.send(json.dumps({
                 "type": "input_audio_buffer.append",
                 "audio": b64_pcm16,
             }))
+            if detector is not None:
+                turn_ended = detector.feed(call_media_rms(payload))
+                # 이미 모델이 응답을 생성 중이면(_response_in_flight) 지금 감지된 "종료"는 어르신이
+                # 에이전트 말 중간에 끼어든 것일 수 있어 여기서 commit/create를 걸지 않는다 — 겹쳐서
+                # 응답 두 개가 동시에 나가는 문제를 피하기 위함(_pump_upstream 쪽 response_pending
+                # 처리와 같은 이유).
+                if turn_ended and not state.get("_response_in_flight"):
+                    log.info("[%s] 로컬 발화 종료 감지 — commit + response.create", session_id)
+                    await upstream.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                    await upstream.send(json.dumps({"type": "response.create"}))
         elif etype == "dtmf":
             log.info("phone call dtmf: %s", event.get("dtmf", {}).get("digit"))
         elif etype == "stop":
@@ -324,6 +379,10 @@ async def _pump_upstream(upstream, sink: OutputSink, state: dict, session_id: st
             response_had_audio = False  # 새 응답이 시작됨 — 이 응답의 발화 여부를 새로 추적
             response_audio_bytes = 0
             response_had_activity = False
+            # MANUAL_TURN_DETECTION의 _pump_downstream_call이 이 응답과 겹쳐서 자기 나름의
+            # commit/response.create를 걸지 않도록 신호 — 아래 response.done의 최종 종료 지점에서
+            # 다시 내린다(중간에 이어서 response.create를 또 거는 경로들은 내리지 않는다).
+            state["_response_in_flight"] = True
 
         elif etype == "response.output_audio.delta":
             _mark_answer_started()
@@ -491,6 +550,9 @@ async def _pump_upstream(upstream, sink: OutputSink, state: dict, session_id: st
                 log.info("[%s] 에이전트: %s", session_id, joined)
                 state["_last_agent_utterance"] = joined
                 agent_text_parts.clear()
+            # 이 응답이 진짜로 끝났다(이어서 response.create를 걸지 않는다) — 이제부터 어르신 차례이니
+            # MANUAL_TURN_DETECTION의 로컬 종료 감지가 commit/response.create를 걸어도 안전하다.
+            state["_response_in_flight"] = False
             await sink.send_event({"type": "turn_done"})  # 다음 발화용 새 말풍선을 열라는 신호
             if ending:
                 # 오디오를 다 보냈다고 상대가 다 들었다는 보장은 없다 — 방금 응답의 실제 재생
@@ -502,6 +564,7 @@ async def _pump_upstream(upstream, sink: OutputSink, state: dict, session_id: st
 
         elif etype == "error":
             log.error("upstream error: %s", event)
+            state["_response_in_flight"] = False
             await sink.send_event({
                 "type": "error",
                 "message": event.get("error", {}).get("message", "unknown error"),
@@ -631,7 +694,7 @@ async def call_stream_ws(client_ws: WebSocket) -> None:
             # 인사말이 나가기 전 아주 짧게 전화선 소음을 재서 이번 통화의 VAD threshold를 보정한다
             # (조용한 집/시끄러운 환경에 따라 오탐지 위험이 다르므로) — xAI 세션을 열기 전에 해야
             # 그 결과를 session.update에 바로 실을 수 있다.
-            vad_threshold = await _calibrate_vad_threshold(client_ws)
+            vad_threshold, ambient_rms = await _calibrate_vad_threshold(client_ws)
             async with websockets.connect(
                 realtime_url(model),
                 additional_headers={"Authorization": f"Bearer {require_env('XAI_API_KEY')}"},
@@ -641,7 +704,10 @@ async def call_stream_ws(client_ws: WebSocket) -> None:
                     "session": {
                         "voice": os.environ.get("TTS_VOICE", "ara"),
                         "instructions": prompts.IDENTITY_PROMPT,
-                        "turn_detection": turn_detection_config(vad_threshold),
+                        # MANUAL_TURN_DETECTION이면 xAI 자체 server_vad를 끄고(null) 발화 종료
+                        # 감지를 우리가 직접 한다 — 발화 시작은 여전히 오디오를 계속 흘려보내는 것만으로
+                        # 암묵적으로 처리된다(xAI가 별도 시작 신호를 요구하지 않음).
+                        "turn_detection": None if MANUAL_TURN_DETECTION else turn_detection_config(vad_threshold),
                         "input_audio_format": "pcm16",
                         "output_audio_format": "pcm16",
                         "tools": agent_tools.build_tools(),
@@ -656,7 +722,9 @@ async def call_stream_ws(client_ws: WebSocket) -> None:
                 upstream_task = asyncio.create_task(
                     _pump_upstream(upstream, CallSink(client_ws), state, session_id)
                 )
-                downstream_task = asyncio.create_task(_pump_downstream_call(client_ws, upstream, state))
+                downstream_task = asyncio.create_task(
+                    _pump_downstream_call(client_ws, upstream, state, ambient_rms, session_id)
+                )
 
                 done, pending = await asyncio.wait(
                     {upstream_task, downstream_task}, return_when=asyncio.FIRST_COMPLETED
@@ -730,6 +798,9 @@ async def create_call(
 ) -> dict:
     # * 메인 서버에서 부르는 통화 트리거. body: {recipient_id, phone_number, profile?, model?}
     # * 블로킹 대기 중인 Spring에 즉시 accepted를 반환하고 실제 발신은 백그라운드로.
+    # * body에 model이 없으면(Spring이 굳이 안 골라줬으면) .env의 DEFAULT_CALL_MODEL로 감 —
+    # * 지금은 이게 실제 통화의 기본 모델이 Gemini Live가 되게 하는 유일한 지점이다. xAI로 걸고
+    # * 싶으면 Spring이 body.model에 xAI 모델명(예: grok-voice-latest)을 명시하면 됨.
 
     check_internal_key(x_api_key)
     body = await request.json()
@@ -738,8 +809,9 @@ async def create_call(
     if recipient_id is None or not phone_number:
         raise HTTPException(status_code=400, detail="'recipient_id' and 'phone_number' are required")
 
+    model = body.get("model") or os.environ.get("DEFAULT_CALL_MODEL", "gemini-3.1-flash-live-preview")
     background_tasks.add_task(
-        _place_call, recipient_id, phone_number, body.get("profile") or {}, body.get("model"),
+        _place_call, recipient_id, phone_number, body.get("profile") or {}, model,
     )
     return {"status": "accepted"}
 

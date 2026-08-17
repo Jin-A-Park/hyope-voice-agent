@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import time
 
 from agent import prompts, stages
@@ -72,9 +73,15 @@ def _question_goal(q: stages.QuestionCandidate) -> str:
     # * 흐름에 자연스럽게 얹어 직접 질문을 지어내게 한다 — GDS-5/GAD-2/SIS 같은 본 문항(검증된
     # * 척도라 문구를 임의로 바꾸면 안 됨)은 여전히 text를 그대로 참고해서 묻는다.
     if q.improvise:
+        # * angles가 있으면(현재 depression_entry/health_entry) 매번 전체 text를 그대로 목표로
+        # * 주지 않고 그중 하나만 랜덤으로 골라 시드로 준다 — text 하나로 고정하면 모델이 매 통화
+        # * 거의 똑같은 표현으로 수렴하는 문제가 있었다(실제 사례: "가라앉거나 축 처지는 날이 있는지"를
+        # * 매번 그대로 질문화). 관점 자체를 바꿔주면 모델이 진짜로 새로 문장을 지어야 해서 표현이
+        # * 통화마다 달라진다.
+        seed = random.choice(q.angles) if q.angles else q.text
         return (
-            f"목표: \"{q.text}\". 이 문장을 그대로 옮기지 말고, 지금까지 나눈 대화에 자연스럽게 "
-            "이어 붙여 네가 직접 질문을 새로 만들어 편하게 물어보세요."
+            f"목표: \"{seed}\". 이 문장을 그대로 옮기지 말고, 지금까지 나눈 대화에 자연스럽게 "
+            "이어 붙여 이전 통화들과는 다른 표현으로 네가 직접 질문을 새로 만들어 편하게 물어보세요."
         )
     return f"다음 질문: \"{q.text}\"를 참고해서 자연스럽게 이어서 질문하세요."
 
@@ -121,7 +128,13 @@ def build_tools() -> list[dict]:
                                     "'부적절': 답변이 질문과 동떨어지거나 이해를 못한 것처럼 보이는 동문서답. "
                                     "'문제없음': 답변 내용에 우려할 만한 게 특별히 없음. ",
                     },
-                    "reason": {"type": "string", "description": "판단 근거 한 문장."},
+                    "reason": {
+                        "type": "string",
+                        "description": "판단 근거를 15자 내외의 짧은 한 문장으로만. 지금 이 답변 "
+                                    "내용에만 집중하고, 다른 스테이지나 이전에 확인된 문제(예: '~는 "
+                                    "여전히 남아있어 검증 상태를 유지합니다' 같은 상태머신 설명)는 "
+                                    "언급하지 마세요 — 그건 서버가 알아서 추적합니다.",
+                    },
                     "discomfort_flags": {
                         "type": "array",
                         "description": "답변 안에서 다른 스테이지에 속하는 우려 신호가 감지된 경우에만 "
@@ -143,7 +156,13 @@ def build_tools() -> list[dict]:
                                 },
                                 "category": {
                                     "type": "string", "enum": stages.DISCOMFORT_CATEGORY_VALUES,
-                                    "description": "그 문제가 속한 스테이지 유형.",
+                                    "description": "그 문제가 속한 스테이지 유형. 호흡곤란/가슴 답답함/의식이 "
+                                                "흐려짐/쓰러짐/심한 두통이 갑자기 시작됨/한쪽 팔다리에 힘이 "
+                                                "안 들어감처럼 응급 신호로 볼 수 있는 증상은 'health'가 아니라 "
+                                                "'emergency'로 신고하십시오 — 특히 두통과 호흡곤란처럼 두 "
+                                                "증상이 같이 나오면 단순 건강 문항으로 묻어가지 말고 "
+                                                "'emergency'로 신고해야 응급 대응(안심시키고 병원/응급실 "
+                                                "안내)이 제대로 걸립니다.",
                                 },
                                 "severity": {
                                     "type": "string", "enum": SEVERITIES,
@@ -180,8 +199,13 @@ def build_tools() -> list[dict]:
                     "answer_requirement": {"type": "string", "description": "답변이 요구하는 바(e.g., '응급실 검색', '병원 검색', '상담센터 검색')"},
                     "keyword": {
                         "type": "string",
-                        "description": "검색어(e.g., '응급실', '병원', '보건소', '정신건강복지센터'). 어르신이 "
-                                    "도움처 안내에 동의하지 않았으면 이 필드는 채우지 말고 생략하십시오.",
+                        "description": "검색어. '병원'처럼 막연하게 넣지 말고 실제 증상에 맞는 진료과/기관으로 "
+                                    "구체적으로 넣으십시오 — 안 그러면 두통인데 치과가 뜨는 식으로 엉뚱한 곳이 "
+                                    "나옵니다. 예: 두통·어지러움은 '신경과', 소화·복통은 '내과', 관절·낙상·계단 "
+                                    "오르기 어려움은 '정형외과', 수면 문제는 '수면클리닉' 또는 '내과', 우울·불안·"
+                                    "무기력은 '정신건강복지센터', 인지저하·기억력은 '신경과', 응급 상황은 "
+                                    "'응급실', 그 외 일반적인 경우는 '보건소'. 어르신이 도움처 안내에 동의하지 "
+                                    "않았으면 이 필드는 채우지 말고 생략하십시오.",
                     },
                 },
                 "required": ["stage_type", "answer_requirement"],
@@ -304,7 +328,8 @@ def _complete_stage_and_advance(
     if stage_state.stage == stages.StageType.CLOSING:
         return {
             "ok": True, "action": "end_call",
-            "next_step": "짧게 작별 인사를 건네고 통화를 마치세요.",
+            "next_step": "짧게 작별 인사를 건네고 반드시 end_call을 호출해 통화를 마치세요 — "
+                         "작별 인사만 말하고 end_call 호출을 빼먹으면 통화가 안 끊깁니다.",
         }
 
     # pick_next_stage()가 후보를 못 찾으면 closing을 스스로 재활성화해서 돌려주므로 여기선 None을
@@ -564,8 +589,27 @@ def check_in(
     # 아직 임의 기본값(EVENT)이라 그 카테고리 자체를 자기 자신으로 착각해 걸러내는 예외 케이스가
     # 있을 수 있지만, 그 정도는 감수한다 — 나머지 카테고리는 정상적으로 스폰되어 첫 스테이지
     # 선택(_advance)에 곧바로 반영된다.
+    #
+    # discomfort_flags 대신 그냥 stage/assessment로 곧장 증상을 보고하는 경우도 있다(실제 사례:
+    # 첫 답변에서 discomfort_flags 없이 stage="health"+assessment="문제있음"으로 허리/머리 통증을
+    # 보고했는데 이 분기가 stage/assessment를 아예 안 보고 버려서 신호가 통째로 사라짐 — "첫
+    # 호출엔 stage 생략" 지시를 모델이 안 지켜도 신호 자체를 놓치면 안 된다). 유효한 stage +
+    # "문제있음"이면 discomfort_flags 하나를 합성해서 같은 스폰 로직(및 EMERGENCY severity 강제
+    # 상향 등 기존 규칙)을 그대로 태운다.
     if buffer.turn_count == 0:
-        _spawn_discomfort_flags(state, buffer, buffer.current(), discomfort_flags)
+        synthesized_flags = list(discomfort_flags or [])
+        if assessment == "문제있음":
+            try:
+                reported_stage = stages.StageType(stage)
+            except (ValueError, TypeError):
+                reported_stage = None
+            if reported_stage is not None:
+                synthesized_flags.append({
+                    "signal": reason or f"{reported_stage.value} 관련 문제 보고",
+                    "category": reported_stage.value,
+                    "severity": "low",
+                })
+        _spawn_discomfort_flags(state, buffer, buffer.current(), synthesized_flags)
         return json.dumps(_advance(state, buffer), ensure_ascii=False)
 
     # 1) discomfort_flags는 지금 판정 중인 스테이지가 뭐든 상관없이(다른 카테고리를 가리키는
@@ -598,6 +642,19 @@ def check_in(
         }, ensure_ascii=False)
     stage_state = buffer.current()
 
+    if stage_state.resource_offer_pending:
+        # * 방금 그 턴은 도움처 검색 제안만 하고 끝났어야 한다(3.8 참고) — 지금 들어온 assessment/reason은
+        # * 그 제안에 대한 어르신 답(수락/거절)일 뿐 실제 문항 판정이 아니므로 logic_data에 쓰면 안 되고,
+        # * _apply_assessment도 타면 안 된다(이미 앞선 턴에서 문항 판정은 끝났음). 플래그만 내리고 곧장
+        # * 진짜 다음 질문을 내준다.
+        stage_state.resource_offer_pending = False
+        result = _advance(state, buffer)
+        if "next_step" in result:
+            result["next_step"] = (
+                "공감성 발언을 짧게 건넵니다. 그리고 해당 instruction을 실행하세요: " + result["next_step"]
+            )
+        return json.dumps(result, ensure_ascii=False)
+
     state["logic_data"][stage_type.value] = {"judgment": assessment, "reason": reason}
     # * logic_data와 별개로 문항(question_id) 단위로도 남긴다 — 카테고리 단위인 logic_data와 달리,
     # * "복약/식사"처럼 한 카테고리 안에 문항이 여럿(medication_entry/meal_entry)이어도 서로 안
@@ -616,6 +673,28 @@ def check_in(
     if stage_type == stages.StageType.CLOSING and assessment != "문제없음":
         stage_state.fail_current_question()
         stage_completed = False
+    elif (
+        stage_type == stages.StageType.EMERGENCY
+        and stage_state.level == stages.StageLevel.TRY
+        and not stage_state.confirmed
+    ):
+        # * 이건 questions.json의 실제 문항이 아니라 모델이 즉석에서 던진 확인 질문(_advance의
+        # * clarify_emergency 분기 참고)에 대한 답변이라 current_question이 없다 — 그대로
+        # * _apply_assessment에 흘리면 "문제있음"일 때 level이 VALIDATE로 넘어가버려서, 아래에서
+        # * confirmed=True로 확정해도 _advance가 더는 TRY 분기(action="emergency" 안심+병원 안내)를
+        # * 못 타고 그냥 다음 응급 문항을 "도전"으로 다시 물어버린다 — 어르신 입장에선 방금 확인한 걸
+        # * 또 캐묻는 것처럼 들린다(실제 이슈). "문제있음"이면 level을 TRY로 그대로 둬서 아래에서
+        # * confirmed만 확정하고, _advance가 다음에 이 스테이지를 다시 뽑을 때 곧장 안심 안내로
+        # * 가게 한다. "문제없음"(허위 경보)이면 애초에 물어볼 문항도 없으니 바로 완료 처리한다.
+        if assessment == "문제있음":
+            stage_completed = False
+        else:
+            stage_state.level, stage_state.priority = stages.StageLevel.COMPLETED, -1
+            stage_completed = True
+        log.info(
+            "[stage] %s: try(unconfirmed) -> %s(%s) [assessment=%s, question=None(ad-hoc confirm)]",
+            stage_state.stage.value, stage_state.level.value, stage_state.priority, assessment,
+        )
     else:
         stage_completed = _apply_assessment(buffer, stage_state, assessment)
 
@@ -661,28 +740,35 @@ def check_in(
     # 카테고리가 severity="medium"/"high"(capped_tier와 동일 범위 — 3.6번은 low->high만 처리해서
     # medium은 계속 medium인 채로 캡에 걸릴 수 있는데, 그 경우에도 권유는 나가야 한다)로 확인 중일
     # 때, 그 티어의 "첫" 질문 답변까지 또 "문제있음"으로 나오면(high_severity_asks==1) 응급 상황과
-    # 다르게(강제 절차 없이) 관련 도움처를 물어보라고 안내한다. next_step 뒤에 덧붙이면 모델이
-    # "다음 질문으로 이어가라"는 지시에 밀려 권유 자체를 건너뛰는 경우가 있었다 — 다음 질문 지시보다
-    # 먼저 오도록 앞에 둔다. 실제로 도움처를 호출할지는 어르신이 원하는지에 달렸지만, 여쭤보는
-    # 행위 자체는 건너뛰지 않도록 문구를 단정적으로 바꿨다.
-    recommend_note = ""
+    # 다르게(강제 절차 없이) 관련 도움처를 물어보라고 안내한다.
+    #
+    # 예전엔 이 권유 문구를 "다음 질문" 지시와 한 next_step에 이어붙이고 "원치 않으면 그때 다음
+    # 질문으로"라고 텍스트로만 순서를 설명했는데, 모델이 그 순서를 안 지키고 한 턴에 권유+다음
+    # 질문을 같이 말해버리는 경우가 있었다(실제 통화 사례 — 프롬프트 문구를 아무리 강하게 써도
+    # 완전히 막긴 어려움). 그래서 여기서는 텍스트가 아니라 상태(resource_offer_pending)로
+    # 순서를 강제한다 — 이 턴은 권유 next_step만 돌려주고 _advance()를 아예 안 부른다. 진짜
+    # 다음 질문은 위 resource_offer_pending 게이트(이 함수 상단)가 다음 호출에서 내준다.
     if (
         stage_type != stages.StageType.EMERGENCY
         and stage_state.severity in ("medium", "high")
         and stage_state.high_severity_asks == 1
         and assessment == "문제있음"
     ):
-        recommend_note = (
-            " 그 다음, 방금 확인된 내용과 관련해 근처에 도움받을 수 있는 곳(예: 병원, 보건소, "
-            "상담센터 등)이 있는지 찾아봐드릴지 반드시 한 번 여쭤보세요 — 어르신이 원하면 "
-            "check_external_api_necessity를 호출해서 안내하고, 원치 않는다고 답하면 그때 아래 "
-            "다음 질문으로 넘어가세요."
-        )
-        # pick_next_stage()가 동률 랜덤으로 다른 스테이지(예: health)의 질문을 골라버리면, 권유
-        # 문구("방금 확인된 내용")와 그 뒤에 이어 붙는 "다음 질문"이 서로 다른 카테고리를 가리키게
-        # 되어 말이 안 섞인다(실제 사례: 우울 권유 문구 뒤에 보행 질문이 붙어 나옴) — 이번 턴만큼은
-        # 같은 스테이지가 우선하도록 priority를 다른 VALIDATE 스테이지(기본값 1)보다 높여둔다.
+        stage_state.resource_offer_pending = True
+        # pick_next_stage()가 동률 랜덤으로 다른 스테이지를 골라버리면 이 게이트가 풀렸을 때
+        # 엉뚱한 카테고리의 질문이 나온다 — 이번 라운드만큼은 같은 스테이지가 우선하도록 priority를
+        # 다른 VALIDATE 스테이지(기본값 1)보다 높여둔다.
         stage_state.priority = 2
+        return json.dumps({
+            "ok": True, "action": "offer_resource",
+            "stage_type": stage_type.value,
+            "next_step": "공감성 발언을 짧게 건넨 뒤, 방금 확인된 내용과 관련해 근처에 도움받을 수 "
+                         "있는 곳(예: 병원, 보건소, 상담센터 등)이 있는지 찾아봐드릴지만 여쭤보고 이번 "
+                         "턴을 끝내세요 — 다른 질문은 절대 같이 하지 마세요. 어르신이 원하면 "
+                         "check_external_api_necessity를 호출해서 안내하세요. 어르신 답을 들으면(원하든 "
+                         "원치 않든) 같은 stage로 check_in을 다시 호출하세요 — assessment는 아무 값이나 "
+                         "넣어도 됩니다. 그러면 다음 질문을 안내해 드립니다.",
+        }, ensure_ascii=False)
 
     # 4) closing이 방금 완료됐으면 바로 작별 인사 안내
     if stage_completed and stage_type == stages.StageType.CLOSING:
@@ -695,9 +781,7 @@ def check_in(
     result = _advance(state, buffer)
     if "next_step" in result:
         result["next_step"] = (
-            "공감성 발언을 짧게 건넵니다."
-            + recommend_note
-            + " 그리고 해당 instruction을 실행하세요: " + result["next_step"]
+            "공감성 발언을 짧게 건넵니다. 그리고 해당 instruction을 실행하세요: " + result["next_step"]
         )
     return json.dumps(result, ensure_ascii=False)
 

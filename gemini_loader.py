@@ -9,6 +9,7 @@ import contextlib
 import json
 import logging
 import os
+import time
 
 import websockets
 from fastapi import WebSocket, WebSocketDisconnect
@@ -133,6 +134,30 @@ async def _pump_upstream(upstream, sink: OutputSink, state: dict, session_id: st
     # 끊기 직전 마지막 발화가 재생될 시간을 벌어주기 위해 이번 턴에서 보낸 오디오 바이트 수를
     # 세어둔다(Gemini 출력도 PCM16 24kHz mono = 초당 48000바이트).
     turn_audio_bytes = 0
+
+    # 지연시간 계측(server.py의 xAI 경로와 동일한 목적) — Gemini는 "어르신 발화 완료" 이벤트가
+    # 따로 없어(inputTranscription은 델타로만 옴) 가장 최근 델타 수신 시각을 근사치로 쓴다.
+    timing: dict[str, float | None] = {"voice_in": None, "tool_called": None}
+    answer_started = False
+
+    # * 진단용 카운터 — 대시보드에 대화내역(call_log_entries)이 안 올라가는 문제(실제 사례: 지표는
+    # * 업데이트됐는데 대화내역만 비어 있음)의 원인이 "오디오는 오는데 inputTranscription만 안 오는
+    # * 건지" 아니면 "애초에 오디오 자체가 이상한 건지" 로그만 보고 바로 구분하기 위함 — 통화가
+    # * 끝날 때(finally) 한 줄로 요약해서 남긴다.
+    event_counts = {"audio_chunk": 0, "output_transcription": 0, "input_transcription": 0, "turn_complete": 0}
+
+    def _mark_answer_started() -> None:
+        """이번 턴 들어 처음으로 실제 응답(오디오/텍스트)이 왔다 = LLM 답변 생성 시작."""
+        nonlocal answer_started
+        if answer_started:
+            return
+        answer_started = True
+        if timing["tool_called"] is None:
+            return
+        elapsed_ms = (time.perf_counter() - timing["tool_called"]) * 1000
+        log.info("[%s] 툴 호출 -> LLM 답변 생성: %.0f ms", session_id, elapsed_ms)
+        timing["tool_called"] = None
+
     try:
         async for raw in upstream:
             event = json.loads(raw)
@@ -143,10 +168,14 @@ async def _pump_upstream(upstream, sink: OutputSink, state: dict, session_id: st
                 for part in model_turn.get("parts", []):
                     inline = part.get("inlineData")
                     if inline and inline.get("data"):
+                        event_counts["audio_chunk"] += 1
+                        _mark_answer_started()
                         turn_audio_bytes += len(base64.b64decode(inline["data"]))
                         await sink.send_audio(inline["data"])
                 out_text = (server_content.get("outputTranscription") or {}).get("text")
                 if out_text:
+                    event_counts["output_transcription"] += 1
+                    _mark_answer_started()
                     if not agent_text_parts:  # 이 턴의 첫 델타 — call_log_entries.asked_at으로 쓸 시각을 못박는다
                         state["_last_agent_utterance_at"] = brain.spring_timestamp()
                     agent_text_parts.append(out_text)
@@ -156,6 +185,8 @@ async def _pump_upstream(upstream, sink: OutputSink, state: dict, session_id: st
                 # * 조각 수만큼 새로 열려버린다 — 여기서도 agent와 동일하게 누적한다.
                 in_text = (server_content.get("inputTranscription") or {}).get("text")
                 if in_text:
+                    event_counts["input_transcription"] += 1
+                    timing["voice_in"] = time.perf_counter()  # 가장 최근 델타 수신 시각으로 근사
                     elder_text_parts.append(in_text)
                     await sink.send_event({"type": "transcript", "role": "elder", "delta": in_text})
                 # * turnComplete는 "모델 턴이 끝났다"는 뜻일 뿐 "어르신 턴이 끝났다"는 보장이 아니다.
@@ -163,6 +194,8 @@ async def _pump_upstream(upstream, sink: OutputSink, state: dict, session_id: st
                 # * 여러 번 온다 — 그때마다 말풍선/call_log_entries를 확정하면 어르신이 그 사이 이어 말한
                 # * 내용이 조각조각 분리되어 버린다. agent_text_parts가 실제로 채워진 턴(=모델이 진짜로
                 # * 응답한 턴)에서만 확정한다.
+                if server_content.get("turnComplete"):
+                    event_counts["turn_complete"] += 1
                 if server_content.get("turnComplete") and agent_text_parts:
                     if elder_text_parts:
                         elder_answer = "".join(elder_text_parts)
@@ -189,12 +222,32 @@ async def _pump_upstream(upstream, sink: OutputSink, state: dict, session_id: st
 
             tool_call = event.get("toolCall")
             if tool_call:
+                if timing["voice_in"] is not None:
+                    names = ", ".join(fc["name"] for fc in tool_call["functionCalls"])
+                    log.info(
+                        "[%s] 음성 들어감 -> 툴 선정(%s): %.0f ms",
+                        session_id, names, (time.perf_counter() - timing["voice_in"]) * 1000,
+                    )
+                    timing["voice_in"] = None
+                # * 모델이 end_call과 다른 툴(주로 check_in)을 같은 턴에 같이 부르는 경우가 있다 —
+                # * end_call이 끼어있으면 그게 이번 턴의 최종 결정이다. 다른 툴의 next_step("다음
+                # * 질문 물어봐라")을 그대로 돌려주면 작별 인사와 다음 질문 안내가 한 응답 안에서
+                # * 뒤섞여 뭉개진 문장이 나온다(실제 사례). 상태 반영(logic_data 등)은 그대로 하되,
+                # * 그 결과의 next_step만 "무시하라"는 안내로 바꿔치기한다.
+                calls = tool_call["functionCalls"]
+                ending_this_batch = any(fc["name"] == "end_call" for fc in calls)
                 function_responses = []
-                for fc in tool_call["functionCalls"]:
+                for fc in calls:
                     name = fc["name"]
                     result = await dispatch.dispatch_tool(state, name, fc.get("args") or {})
+                    parsed = json.loads(result)
+                    if ending_this_batch and name != "end_call" and "next_step" in parsed:
+                        parsed["next_step"] = (
+                            "통화 종료 절차가 이미 진행 중입니다 — 이 안내는 무시하고, 방금 건넨 "
+                            "작별 인사만 자연스럽게 마무리하세요."
+                        )
                     function_responses.append({
-                        "id": fc["id"], "name": name, "response": json.loads(result),
+                        "id": fc["id"], "name": name, "response": parsed,
                     })
                     log.info("[%s] gemini tool call: %s(%s)", session_id, name, fc.get("args"))
                     await sink.send_event({"type": "tool_used", "name": name})
@@ -203,11 +256,22 @@ async def _pump_upstream(upstream, sink: OutputSink, state: dict, session_id: st
                 await upstream.send(json.dumps({
                     "toolResponse": {"functionResponses": function_responses},
                 }))
+                # 이 응답 이후 다음 오디오/텍스트 델타가 오면 그게 "답변 생성 시작"이다.
+                timing["tool_called"] = time.perf_counter()
+                answer_started = False
     except (WebSocketDisconnect, asyncio.CancelledError):
         raise
     except Exception:
         log.exception("[%s] gemini upstream pump failed", session_id)
         return False
+    finally:
+        log.info(
+            "[%s] gemini 이벤트 요약 — 오디오청크=%d 출력전사=%d 입력전사=%d 턴종료=%d "
+            "call_log_entries=%d",
+            session_id, event_counts["audio_chunk"], event_counts["output_transcription"],
+            event_counts["input_transcription"], event_counts["turn_complete"],
+            len(state["call_log_entries"]),
+        )
     return True
 
 @contextlib.asynccontextmanager

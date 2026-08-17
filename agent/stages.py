@@ -114,6 +114,9 @@ class QuestionCandidate:
                               # 자연스럽게 떠보려고 직접 지은 문구다 — text를 그대로 읽게 고정하는 대신,
                               # text/note를 "이런 걸 파악하라"는 목표로만 주고 모델이 대화 흐름에 맞춰
                               # 직접 질문을 지어내게 한다(agent/tools.py의 _question_next_step 참고).
+    angles: list[str] | None = None  # improvise 질문에서, text가 늘 같은 표현으로 수렴하는 걸 막기
+                                      # 위한 관점 후보들 — 통화마다 하나만 랜덤으로 골라 그걸 목표로
+                                      # 준다(agent/tools.py의 _question_goal 참고). 없으면 text를 그대로 씀.
 
 
 def _load_question_bank() -> dict[StageType, list[QuestionCandidate]]:
@@ -151,6 +154,11 @@ class StageState:
     # 이전 라운드에서 이미 2를 채운 카운트가 새 라운드에 그대로 넘어와 첫 질문부터 즉시 캡에
     # 걸려버리는 걸 막는다(agent/tools.py의 _spawn_discomfort_flags 참고).
     high_severity_asks: int = 0
+    # * agent/tools.py의 check_in 3.8번(도움처 검색 제안)이 True로 세운다 — 제안과 "다음 질문"을
+    # * 한 next_step에 같이 실어보내면 모델이 한 턴에 둘 다 말해버리는 문제가 있어서(실제 통화
+    # * 사례), 그 턴엔 제안만 돌려주고 다음 질문은 이 플래그가 다시 False로 돌아온 그다음 호출
+    # * 에야 내준다 — 프롬프트 문구가 아니라 상태로 순서를 강제한다.
+    resource_offer_pending: bool = False
     current_question: QuestionCandidate | None = None
     questions: list[QuestionCandidate] = field(init=False)
 
@@ -278,7 +286,11 @@ def pick_next_stage(buffer: CallStageBuffer) -> StageType | None:
     # * 0) 호출될 때마다 턴 시계를 하나 진행시킨다(min_gap 계산 기준).
     # * 1) severity가 채워진 TRY 스테이지(아직 안 물어본 상태로 discomfort_flags에 의해 막 스폰됐거나,
     #      또는 baseline 대기 중 severity가 붙은 경우)가 하나라도 있으면, 다른 정렬 다 무시하고
-    #      그중 최우선 선택(severity 높은 순 -> 동률이면 랜덤) — 안전 예외.
+    #      그중 최우선 선택(severity 높은 순 -> 동률이면 EMERGENCY 우선, 그래도 동률이면 랜덤) —
+    #      안전 예외. EMERGENCY를 우선하는 이유: 위급 신호를 확인하던 도중 어르신이 같은 증상을
+    #      다른 카테고리(예: health)로도 겸해 언급하면 그 카테고리가 severity="high"로 같이
+    #      뜨는데, 여기서 랜덤에 맡기면 확인 라운드 도중에 응급 대응이 아니라 엉뚱한 baseline
+    #      질문(지병 여부 등)으로 새버릴 수 있다 — 실제 통화에서 발견된 문제.
     # * 2) 그 외엔 CLOSING을 뺀 나머지 중에서 LEVEL_ORDER가 1차 기준(값이 클수록 먼저), priority가
     #      2차 기준(값이 클수록 먼저), 둘 다 동률이면 랜덤. CLOSING은 다른 스테이지와 우선순위를
     #      다투지 않는다 — 그래서 아래 후보 목록에서 항상 제외하고, 정말 아무 후보도 안 남았을 때만
@@ -306,6 +318,9 @@ def pick_next_stage(buffer: CallStageBuffer) -> StageType | None:
         severity_rank = {"high": 2, "medium": 1, "low": 0}
         max_rank = max(severity_rank[s.severity] for s in urgent_new)
         top = [s for s in urgent_new if severity_rank[s.severity] == max_rank]
+        emergency_top = [s for s in top if s.stage == StageType.EMERGENCY]
+        if emergency_top:
+            return emergency_top[0].stage
         return random.choice(top).stage
 
     max_level = max(LEVEL_ORDER[s.level] for s in candidates)
