@@ -36,8 +36,15 @@ def push_guardian_alert(alert: dict) -> None:
     # 연락처 조회는 그 정보를 이미 갖고 있는 Spring이 처리한다(push_call_result와 동일한 패턴).
     # 다만 Spring엔 SMS 발신 수단이 없으므로, 실제 문자 발송은 여기서 기존 ClawOps 클라이언트로
     # 한다 — Spring이 응답으로 돌려준 보호자 번호를 그대로 쓴다.
+    recipient_id = (alert.get("metadata") or {}).get("recipient_id")
+    if recipient_id is None:
+        # 브라우저 데모/테스트 통화 — dispatch.py의 즉시-통보 경로가 이제 이 경우를 걸러내지만,
+        # 그 수정 이전에 이미 파일 폴백으로 쌓인 항목(예: 배포 전 발생분)은 recipient_id가 없어
+        # Spring이 영원히 500을 낼 수 있다. 여기서도 걸러서 무한 재시도 루프에 빠지지 않게 한다.
+        log.info("recipient_id 없음(브라우저 데모) — 알림 스킵: %s", alert["id"])
+        return
     payload = {
-        "recipient_id": (alert.get("metadata") or {}).get("recipient_id"),
+        "recipient_id": recipient_id,
         "signal": alert["alert"],
         "severity": "high",
         "logic_data": alert["logic_data"],

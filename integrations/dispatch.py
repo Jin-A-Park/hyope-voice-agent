@@ -101,9 +101,18 @@ async def dispatch_tool(state: dict, name: str, args: dict) -> str:
 
     result = agent_tools.run_tool(state, name, args)
 
-    for alert in state.pop("_pending_guardian_alerts", []):
-        ok = await _send_emergency_alert_now(state, alert)
-        if not ok:
-            _file_fallback_guardian_alert(state, alert)
+    pending_alerts = state.pop("_pending_guardian_alerts", [])
+    if pending_alerts:
+        recipient_id = (state.get("_metadata") or {}).get("recipient_id")
+        if recipient_id is None:
+            # 브라우저 데모/테스트 통화 — brain.write_call_result_outbox와 동일한 원칙(recipient_id
+            # 없으면 스킵). 여기서 안 거르면 존재하지 않는 recipient_id로 Spring을 두드리다 실패해
+            # 파일 폴백에 쌓이고, worker.py가 성공할 때까지(영원히) 재시도하게 된다.
+            log.info("recipient_id 없음(브라우저 데모) — 응급 알림 스킵 (%d건)", len(pending_alerts))
+        else:
+            for alert in pending_alerts:
+                ok = await _send_emergency_alert_now(state, alert)
+                if not ok:
+                    _file_fallback_guardian_alert(state, alert)
 
     return result
