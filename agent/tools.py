@@ -409,6 +409,26 @@ def build_call_summary_text(logic_data: dict, buffer: stages.CallStageBuffer, pr
     return "\n".join(lines)
 
 
+def build_call_summary_highlights(logic_data: dict) -> str:
+    # * ClawOps SMS 발송은 본문이 200바이트를 넘으면 그대로 거부한다(clawops.BadRequestError) —
+    # * build_call_summary_text()의 풀 버전(기존/신규 대조, OO 호소 등)은 한글이 많아 카테고리
+    # * 2~3개만 있어도 200바이트를 훌쩍 넘는다(실제 통화에서 발견된 실패 사례). 그래서 실제
+    # * SMS 본문에는 이 압축판(문제있음류 카테고리 라벨만 나열)을 쓰고, 상세 내용은
+    # * runtime/call_summaries/*.txt 디버그 파일에만 build_call_summary_text()로 남긴다.
+    # * EVENT는 스크리닝 카테고리가 아니라(그냥 근황 수집용) judgment와 무관하게 항상 제외한다.
+    labels = []
+    for stage in _SUMMARY_STAGE_ORDER:
+        if stage == stages.StageType.EVENT:
+            continue
+        entry = logic_data.get(stage.value)
+        if not entry or entry.get("judgment") == "문제없음":
+            continue
+        labels.append(_stage_label(stage))
+    if not labels:
+        return "특이사항 없음"
+    return ", ".join(labels) + " 관련 대화가 있었어요"
+
+
 def build_profile_updates_text(profile_updates: list[dict]) -> str:
     # * update_recipient_profile로 이번 통화 중 반영된 취미/근황 변경 사항을 요약 SMS에 같이 실어
     # * 보호자가 통화 내용 전체(불편 사항 + 새로 알게 된 근황/취미)를 한 문자로 받게 한다.

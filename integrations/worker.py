@@ -128,6 +128,15 @@ def push_call_result(entry: dict) -> None:
         # 채점 서비스 미연동(placeholder) 경로 — entry 쪽 값으로 대체.
         # 이 필드 없는 예전 outbox 항목과도 하위호환.
         incomplete_categories = entry.get("incomplete_categories", [])
+    # * assessment.summary는 Spring의 AssessmentService.checkAndCreateNotification이 그대로
+    # * "오늘의 리포트가 도착했어요" 알림의 서브텍스트로 쓰고, 리포트 상세 화면(AssessmentResponse.
+    # * summary)에도 노출된다 — 그런데 채점 서비스(ASSESS_URL)가 없으면 이 필드는 "채점
+    # * 미연동... placeholder 값입니다" 같은 의미 없는 문구다. entry["summary_sms_text"]에 이미
+    # * agent/brain.py가 만든 실제 통화 요약(카테고리별 기존/신규 대조, OO 호소 등)이 있으니,
+    # * 있으면 그걸로 덮어써서 대시보드에 진짜 내용이 뜨게 한다.
+    full_summary = entry.get("summary_sms_text")
+    if full_summary:
+        assessment["summary"] = full_summary
     payload = {
         "recipient_id": entry["recipient_id"],
         "call_log": entry["call_log"],

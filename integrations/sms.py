@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
 
 from clawops import AsyncClawOps
 
@@ -47,17 +46,42 @@ async def send_resource_sms(to: str, resources: list[dict]) -> bool:
     return True
 
 
-def _call_summary_sms_body(recipient_name: str, summary_text: str) -> str:
-    called_at = datetime.now().strftime("%m월 %d일 %H:%M")
-    return (
-        "[하이오피] 통화 요약\n"
-        f"대상자: {recipient_name}님\n"
-        f"통화 시각: {called_at}\n\n"
-        f"{summary_text}"
+_MAX_SMS_BYTES = 200  # ClawOps가 본문이 이 바이트 수를 넘으면 BadRequestError로 거부한다.
+
+
+def _truncate_utf8_bytes(text: str, max_bytes: int) -> str:
+    # * 한글은 UTF-8에서 글자당 3바이트라 len(text)만으로는 실제 전송 바이트 수를 가늠할 수 없다 —
+    # * 실제로 카테고리 2~3개짜리 요약도 200바이트를 넘어 ClawOps가 통째로 거부한 사례가 있었다
+    # * (clawops.BadRequestError: SMS Body는 200byte를 초과할 수 없습니다). 호출부(아래
+    # * _call_summary_sms_body)가 이미 짧게 만들지만, 이름/카테고리 개수에 따라 그래도 넘칠 수
+    # * 있으니 마지막 안전장치로 바이트 단위로 잘라낸다 — 멀티바이트 문자 중간을 끊으면 디코딩
+    # * 에러가 나므로, 끝에서부터 한 바이트씩 줄여가며 유효한 UTF-8이 될 때까지 시도한다.
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    truncated = encoded[:max_bytes]
+    while truncated:
+        try:
+            return truncated.decode("utf-8")
+        except UnicodeDecodeError:
+            truncated = truncated[:-1]
+    return ""
+
+
+def _call_summary_sms_body(recipient_name: str, highlights: str) -> str:
+    # * highlights는 agent/tools.py의 build_call_summary_highlights()가 만드는 압축판(문제있음류
+    # * 카테고리 라벨만 나열, 예: "건강, 우울 관련 대화가 있었어요") — 카테고리별 상세 내용(기존/
+    # * 신규 대조, OO 호소 등)은 여기 안 싣는다. 그건 runtime/call_summaries/*.txt 디버그 파일에만
+    # * 남는다(200바이트 제한 때문에 SMS엔 못 담음).
+    body = (
+        f"[하이오피] {recipient_name}님 통화 요약\n"
+        f"{highlights}\n"
+        "자세한 내용은 앱에서 확인해 주세요."
     )
+    return _truncate_utf8_bytes(body, _MAX_SMS_BYTES)
 
 
-async def send_call_summary_sms(to: str, recipient_name: str, summary_text: str) -> bool:
+async def send_call_summary_sms(to: str, recipient_name: str, highlights: str) -> bool:
     """통화 종료 직후(server.py의 call-end 처리에서, send_resource_sms와 동일한 패턴으로) 즉시
     보호자에게 통화 요약 문자 발송.
 
@@ -70,7 +94,7 @@ async def send_call_summary_sms(to: str, recipient_name: str, summary_text: str)
     try:
         await _sms_client().messages.create(
             to=to, from_=os.environ["CLAWOPS_FROM_NUMBER"],
-            body=_call_summary_sms_body(recipient_name, summary_text), type="sms",
+            body=_call_summary_sms_body(recipient_name, highlights), type="sms",
         )
     except Exception:
         log.exception("send_call_summary_sms failed")

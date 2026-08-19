@@ -117,29 +117,35 @@ def write_call_result_outbox(state: dict, status: str) -> dict | None:
     # 아니라 "간접 스크리닝에서 이상 없었다"는 뜻이다 — serve/Spring으로 나가기 직전에 반영한다.
     tools.backfill_implicit_screening(state["logic_data"])
 
-    # 통화 종료 시 보호자에게 보낼 요약 SMS 본문 — 보호자 전화번호는 통화 시작 시 Spring이
-    # 넘겨준 profile에 실려 온다(check_external_api_necessity가 이미 같은 profile에서 address를
-    # 읽는 것과 동일한 경로, integrations/dispatch.py 참고). 없으면(Spring이 아직 이 필드를 안
-    # 보내주거나 보호자가 미등록인 경우) worker.py가 조용히 SMS 발송을 건너뛴다.
-    # 예전 emergency-alerts 응답이 "010-1234-5678"처럼 하이픈 섞어 내려보냈던 것과 같은 이유로,
-    # 여기서도 방어적으로 하이픈/공백을 제거해둔다(ClawOps가 정규화된 번호를 기대함).
+    # 통화 종료 시 보호자에게 보낼 요약 — 보호자 전화번호는 통화 시작 시 Spring이 넘겨준 profile에
+    # 실려 온다(check_external_api_necessity가 이미 같은 profile에서 address를 읽는 것과 동일한
+    # 경로, integrations/dispatch.py 참고). 없으면(Spring이 아직 이 필드를 안 보내주거나 보호자가
+    # 미등록인 경우) 아래 호출부가 SMS 발송을 건너뛴다. 예전 emergency-alerts 응답이
+    # "010-1234-5678"처럼 하이픈 섞어 내려보냈던 것과 같은 이유로, 여기서도 방어적으로 하이픈/공백을
+    # 제거해둔다(ClawOps가 정규화된 번호를 기대함).
     guardian_phone_number = (metadata.get("profile") or {}).get("guardian_phone_number")
     if guardian_phone_number:
         guardian_phone_number = guardian_phone_number.replace("-", "").replace(" ", "")
     recipient_name = (metadata.get("profile") or {}).get("recipient_name") or "대상자"
-    summary_sms_text = tools.build_call_summary_text(state["logic_data"], buffer, metadata.get("profile") or {})
+
+    # 상세 버전(카테고리별 기존/신규 대조, OO 호소 등)은 디버그 파일/추후 확장용으로만 쓴다 — 실제
+    # SMS 본문에 그대로 실으면 ClawOps의 200바이트 제한(clawops.BadRequestError)에 걸려 아예
+    # 발송이 거부된다(실제 통화에서 발견됨). SMS엔 build_call_summary_highlights()가 만드는
+    # 압축판(문제있음류 카테고리 라벨만 나열)만 싣는다.
+    full_summary_text = tools.build_call_summary_text(state["logic_data"], buffer, metadata.get("profile") or {})
     profile_updates_text = tools.build_profile_updates_text(state["profile_updates"])
     if profile_updates_text:
-        summary_sms_text += "\n\n[근황/취미 업데이트]\n" + profile_updates_text
+        full_summary_text += "\n\n[근황/취미 업데이트]\n" + profile_updates_text
+    sms_highlights = tools.build_call_summary_highlights(state["logic_data"])
 
     cr_id = f"CR-{uuid.uuid4().hex[:12]}"  # worker.py의 처리완료 원장(ledger) 키 — 요약 디버그 파일명도 같이 씀
-    _write_call_summary_debug_file(cr_id, recipient_id, recipient_name, guardian_phone_number, summary_sms_text)
+    _write_call_summary_debug_file(cr_id, recipient_id, recipient_name, guardian_phone_number, full_summary_text)
 
     summary_for_sms = (
         {
             "guardian_phone_number": guardian_phone_number,
             "recipient_name": recipient_name,
-            "summary_sms_text": summary_sms_text,
+            "summary_sms_text": sms_highlights,
         }
         if guardian_phone_number
         else None
@@ -167,7 +173,7 @@ def write_call_result_outbox(state: dict, status: str) -> dict | None:
             "unresolved_questions": state.get("_unresolved_questions") or [],
             "guardian_phone_number": guardian_phone_number,
             "recipient_name": recipient_name,
-            "summary_sms_text": summary_sms_text,
+            "summary_sms_text": full_summary_text,
             "filed_at": time.time(),
         }, ensure_ascii=False) + "\n")
 
