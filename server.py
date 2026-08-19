@@ -567,7 +567,7 @@ async def _pump_upstream(upstream, sink: OutputSink, state: dict, session_id: st
             state["_response_in_flight"] = False
             await sink.send_event({
                 "type": "error",
-                "message": event.get("error", {}).get("message", "unknown error"),
+                "message": event.get("error", {}).get("message ", "unknown error"),
             })
 
 
