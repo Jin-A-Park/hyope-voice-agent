@@ -673,6 +673,8 @@ def _apply_assessment(buffer: stages.CallStageBuffer, stage_state: stages.StageS
         # 대칭. pending_gap 체크가 없으면, sis_encode가 다른 고티어 문항들보다 늦게 뽑혀 마지막으로
         # 채점되는 경우 next_question()이 이미 None(sis_recall은 후보 풀에 안 들어가므로)이라 아직
         # sis_recall을 강제 주입하기도 전에 COGNITIVE가 COMPLETED로 잘못 넘어가 버린다.
+        # * EVENT/INTEREST는 severity 없이도(baseline이라 항상 None) entry + 기존 항목 재확인
+        # * 두 문항을 다 물어야 한다 — stages.TWO_QUESTION_STAGES 참고.
         still_has_items = (
             stage_state.stage in stages.FIXED_SEQUENCE_STAGES
             and stage_state.severity == "high"
@@ -680,6 +682,9 @@ def _apply_assessment(buffer: stages.CallStageBuffer, stage_state: stages.StageS
                 stage_state.next_question() is not None
                 or (buffer.pending_gap is not None and buffer.pending_gap.stage == stage_state.stage)
             )
+        ) or (
+            stage_state.stage in stages.TWO_QUESTION_STAGES
+            and stage_state.next_question() is not None
         )
         if still_has_items:
             stage_state.level, stage_state.priority = stages.StageLevel.VALIDATE, 1
@@ -949,7 +954,18 @@ def check_in(
     # * 이 경우 logic_data는 건드리지 않고 이전 값(이미 확인된 문제있음)을 그대로 유지한다 — 실제
     # * 대화 흐름/상태 전이(_apply_assessment)는 이 판정을 그대로 반영하므로, 여기서 막는 건 오직
     # * "보고되는 요약/채점 데이터"뿐이다.
-    if not (assessment == "문제없음" and _category_had_confirmed_problem(state, stage_state)):
+    if stage_type in (stages.StageType.EVENT, stages.StageType.INTEREST):
+        # * EVENT/INTEREST는 이제 entry(새로 있었던 일) + 기존 항목 재확인, 두 문항을 한 통화에서
+        # * 같이 물어본다(agent/stages.py의 FIXED_SEQUENCE_STAGES/_build_personalized_questions
+        # * 참고) — 위 "문제없음 덮어쓰기 방지"는 증상 지속 여부를 다루는 스크리닝 카테고리용이라
+        # * 여기엔 안 맞는다. 대신 두 번째 문항의 reason이 첫 번째(예: 손주 결혼식 같은 새 근황)를
+        # * 통째로 덮어써 지워버리지 않도록 이어붙인다.
+        prior = state["logic_data"].get(stage_type.value)
+        prior_reason = (prior or {}).get("reason")
+        combined_reason = f"{prior_reason} / {reason}" if prior_reason and reason else (reason or prior_reason)
+        combined_judgment = assessment if assessment == "문제있음" else (prior or {}).get("judgment", assessment)
+        state["logic_data"][stage_type.value] = {"judgment": combined_judgment, "reason": combined_reason}
+    elif not (assessment == "문제없음" and _category_had_confirmed_problem(state, stage_state)):
         state["logic_data"][stage_type.value] = {"judgment": assessment, "reason": reason}
     # * logic_data와 별개로 문항(question_id) 단위로도 남긴다 — 카테고리 단위인 logic_data와 달리,
     # * "복약/식사"처럼 한 카테고리 안에 문항이 여럿(medication_entry/meal_entry)이어도 서로 안
