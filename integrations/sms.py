@@ -74,7 +74,7 @@ def _call_summary_sms_body(recipient_name: str, highlights: str) -> str:
     # * 신규 대조, OO 호소 등)은 여기 안 싣는다. 그건 runtime/call_summaries/*.txt 디버그 파일에만
     # * 남는다(200바이트 제한 때문에 SMS엔 못 담음).
     body = (
-        f"[하이오피] {recipient_name}님 통화 요약\n"
+        f"{recipient_name}님 통화 요약\n"
         f"{highlights}\n"
         "자세한 내용은 앱에서 확인해 주세요."
     )
