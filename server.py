@@ -648,7 +648,13 @@ async def browser_ws(client_ws: WebSocket) -> None:
         except Exception:
             pass
     finally:
-        # 브라우저 데모는 recipient_id가 없어 아웃박스 기록은 call_stream_ws(실제 전화) 경로에서만 한다.
+        # 브라우저 데모는 recipient_id가 없어 Spring 아웃박스 기록은 call_stream_ws(실제 전화)
+        # 경로에서만 한다 — 하지만 로컬 테스트용 요약 디버그 파일(runtime/call_summaries/)은
+        # recipient_id 없이도 write_call_result_outbox가 남기므로 여기서도 호출한다.
+        try:
+            brain.write_call_result_outbox(state, "COMPLETED")
+        except Exception:
+            log.exception("call %s: failed to write local summary debug file", session_id)
         try:
             await client_ws.close()
         except Exception:

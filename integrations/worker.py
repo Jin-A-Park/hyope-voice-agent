@@ -20,97 +20,17 @@ log = logging.getLogger("worker")
 ROOT = Path(__file__).resolve().parent.parent
 RUNTIME_DIR = ROOT / "runtime" # brain.py가 쓰는 append 로그/원장류 임시 파일 전용 폴더 — agent/brain.py와 공유
 
-GUARDIAN_ALERTS_FILE = RUNTIME_DIR / "alerts" / "inbox.jsonl"
-PROCESSED_FILE = RUNTIME_DIR / "alerts" / "processed.txt"
 POLL_SECONDS = 2
 
-# server.py가 통화 종료 시 여기 한 줄씩 남긴다(GUARDIAN_ALERTS_FILE과 같은 내구성 패턴) —
-# 실제 Spring 전송과 채점 모델 호출은 이 파일을 폴링하며 여기서 처리한다.
+# server.py가 통화 종료 시 여기 한 줄씩 남긴다 — 실제 Spring 전송과 채점 모델 호출, 보호자
+# 요약 SMS 발송을 이 파일을 폴링하며 여기서 처리한다.
 CALL_RESULT_OUTBOX = RUNTIME_DIR / "call_results" / "outbox.jsonl"
 CALL_RESULT_PROCESSED_FILE = RUNTIME_DIR / "call_results" / "processed.txt"
 SPRING_BASE_URL = os.environ.get("SPRING_BASE_URL", "http://localhost:8080")
 
 
-def push_guardian_alert(alert: dict) -> None:
-    # high-severity 알림을 Spring에 구조화된 데이터로 넘긴다 — 대시보드 알림 생성과 보호자
-    # 연락처 조회는 그 정보를 이미 갖고 있는 Spring이 처리한다(push_call_result와 동일한 패턴).
-    # 다만 Spring엔 SMS 발신 수단이 없으므로, 실제 문자 발송은 여기서 기존 ClawOps 클라이언트로
-    # 한다 — Spring이 응답으로 돌려준 보호자 번호를 그대로 쓴다.
-    recipient_id = (alert.get("metadata") or {}).get("recipient_id")
-    if recipient_id is None:
-        # 브라우저 데모/테스트 통화 — dispatch.py의 즉시-통보 경로가 이제 이 경우를 걸러내지만,
-        # 그 수정 이전에 이미 파일 폴백으로 쌓인 항목(예: 배포 전 발생분)은 recipient_id가 없어
-        # Spring이 영원히 500을 낼 수 있다. 여기서도 걸러서 무한 재시도 루프에 빠지지 않게 한다.
-        log.info("recipient_id 없음(브라우저 데모) — 알림 스킵: %s", alert["id"])
-        return
-    payload = {
-        "recipient_id": recipient_id,
-        "signal": alert["alert"],
-        "severity": "high",
-        "logic_data": alert["logic_data"],
-        "filed_at": alert["filed_at"],
-    }
-    resp = requests.post(
-        f"{SPRING_BASE_URL}/internal/emergency-alerts",
-        json=payload,
-        headers={"X-API-KEY": os.environ.get("INTERNAL_API_KEY", "")},
-        timeout=10.0,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-
-    phone = data.get("guardian_phone_number")
-    if phone:
-        phone = phone.replace("-", "").replace(" ", "")
-    if not phone:
-        # 보호자가 위급상황 알림을 꺼둔 경우 — 정상적인 "문자 안 보냄"이라 에러가 아니다.
-        log.info("guardian opted out of emergency alerts — skipping SMS: %s", alert["id"])
-        return
-
-    # SMS 실패는 raise하지 않는다 — 대시보드 알림은 이미 생성됐으므로, SMS만 재시도하겠다고
-    # 이 함수 전체를 재시도하면 Spring 쪽 알림이 매번 중복 생성된다.
-    if not sms.send_emergency_sms(phone, data["recipient_name"], alert["alert"]):
-        log.warning("guardian emergency SMS failed (dashboard notification already filed): %s", alert["id"])
-
-
-def load_processed() -> set[str]:
-    if PROCESSED_FILE.exists():
-        return set(PROCESSED_FILE.read_text().split())
-    return set()
-
-
-def mark_processed(alert_id: str) -> None:
-    PROCESSED_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with PROCESSED_FILE.open("a") as f:
-        f.write(alert_id + "\n")
-
-
-def pending_alerts() -> list[dict]:
-    if not GUARDIAN_ALERTS_FILE.exists():
-        return []
-    processed = load_processed()
-    alerts = []
-    for line in GUARDIAN_ALERTS_FILE.read_text().splitlines():
-        if not line.strip():
-            continue
-        alert = json.loads(line)
-        if alert["id"] not in processed:
-            alerts.append(alert)
-    return alerts
-
-
 def process_once() -> int:
-    handled = 0
-    for alert in pending_alerts():
-        log.info("new guardian alert: %s (%s)", alert["id"], alert["alert"])
-        try:
-            push_guardian_alert(alert)
-            mark_processed(alert["id"])   # ledger advances ONLY on success
-            handled += 1
-        except Exception:
-            log.exception("failed on %s — will retry next poll", alert["id"])
-    handled += process_call_results_once()
-    return handled
+    return process_call_results_once()
 
 
 # --------------------------------------------------------------------------
@@ -228,6 +148,20 @@ def push_call_result(entry: dict) -> None:
     resp.raise_for_status()
 
 
+def _send_summary_sms(entry: dict) -> None:
+    # * 통화 요약 SMS는 편의 기능이라, 실패해도 call-result 자체의 처리완료 여부(ledger)에는
+    # * 영향을 주지 않는다 — 호출부(process_call_results_once)가 이 함수를 별도 try/except로
+    # * 감싼다. 여기서도 한 번 더 흡수해 로그만 남긴다.
+    phone = entry.get("guardian_phone_number")
+    if not phone:
+        return  # Spring profile에 보호자 번호가 없거나 미등록 — 조용히 스킵
+    summary_text = entry.get("summary_sms_text") or ""
+    if not summary_text:
+        return
+    if not sms.send_call_summary_sms(phone, entry.get("recipient_name") or "대상자", summary_text):
+        log.warning("call summary SMS failed: %s", entry["id"])
+
+
 def process_call_results_once() -> int:
     handled = 0
     for entry in pending_call_results():
@@ -238,20 +172,25 @@ def process_call_results_once() -> int:
             handled += 1
         except Exception:
             log.exception("failed to push call result %s — will retry next poll", entry["id"])
+            continue
+        try:
+            _send_summary_sms(entry)
+        except Exception:
+            log.exception("call summary SMS raised unexpectedly: %s", entry["id"])
     return handled
 
 
 def run_forever() -> None:
     # server.py가 백그라운드 스레드로 이걸 직접 호출한다(같은 프로세스 = 같은 파일시스템이라
     # runtime/ 아래 파일을 server.py와 그대로 공유) — CLI로 별도 실행할 때는 main()이 이걸 부른다.
-    log.info("watching %s and %s (Ctrl-C to stop)", GUARDIAN_ALERTS_FILE, CALL_RESULT_OUTBOX)
+    log.info("watching %s (Ctrl-C to stop)", CALL_RESULT_OUTBOX)
     while True:
         process_once()
         time.sleep(POLL_SECONDS)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Guardian alert worker")
+    parser = argparse.ArgumentParser(description="Call result worker")
     parser.add_argument("--once", action="store_true", help="drain the backlog and exit")
     args = parser.parse_args()
 

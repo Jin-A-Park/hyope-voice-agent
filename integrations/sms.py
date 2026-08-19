@@ -59,44 +59,29 @@ async def send_resource_sms(to: str, resources: list[dict]) -> bool:
     return True
 
 
-def _emergency_sms_body(recipient_name: str, signal: str) -> str:
-    detected_at = datetime.now().strftime("%m월 %d일 %H:%M")
+def _call_summary_sms_body(recipient_name: str, summary_text: str) -> str:
+    called_at = datetime.now().strftime("%m월 %d일 %H:%M")
     return (
-        "[하이오피] 위급 상황 알림\n"
+        "[하이오피] 통화 요약\n"
         f"대상자: {recipient_name}님\n"
-        f"감지 내용: {signal}\n"
-        f"감지 시각: {detected_at}\n\n"
-        "앱에서 자세한 내용을 확인해 주세요."
+        f"통화 시각: {called_at}\n\n"
+        f"{summary_text}"
     )
 
 
-async def send_emergency_sms_async(to: str, recipient_name: str, signal: str) -> bool:
-    """위급 상황 감지 즉시(통화 중, integrations/dispatch.py에서) 보호자에게 문자 발송. 성공하면 True.
+def send_call_summary_sms(to: str, recipient_name: str, summary_text: str) -> bool:
+    """통화 종료 후(integrations/worker.py의 동기 폴링 루프에서) 보호자에게 통화 요약 문자 발송.
 
-    발신 실패는 send_resource_sms와 동일하게 여기서 흡수해 False만 돌려준다 — 대시보드
-    알림(Spring 쪽)은 이미 남았으니, SMS 하나 실패했다고 통화 흐름을 막을 이유는 없다.
-    """
-    try:
-        await _sms_client().messages.create(
-            to=to, from_=os.environ["CLAWOPS_FROM_NUMBER"],
-            body=_emergency_sms_body(recipient_name, signal), type="sms",
-        )
-    except Exception:
-        log.exception("send_emergency_sms_async failed — dashboard notification already filed, continuing")
-        return False
-    return True
-
-
-def send_emergency_sms(to: str, recipient_name: str, signal: str) -> bool:
-    """위급 상황 알림을 integrations/worker.py(동기 폴링 스크립트)가 파일 폴백으로 재처리할 때 쓰는
-    동기 버전. 통화 중 즉시 경로는 send_emergency_sms_async를 쓴다. 흡수 정책은 동일.
+    성공하면 True. 발신 실패는 send_resource_sms와 동일하게 여기서 흡수해 False만 돌려준다 —
+    통화 결과 자체는 이미 Spring에 성공적으로 전달됐으니, 요약 SMS 하나 실패했다고 재시도 루프를
+    돌 이유는 없다(호출부가 로그만 남기고 넘어간다).
     """
     try:
         _sms_client_sync().messages.create(
             to=to, from_=os.environ["CLAWOPS_FROM_NUMBER"],
-            body=_emergency_sms_body(recipient_name, signal), type="sms",
+            body=_call_summary_sms_body(recipient_name, summary_text), type="sms",
         )
     except Exception:
-        log.exception("send_emergency_sms failed — dashboard notification already filed, continuing")
+        log.exception("send_call_summary_sms failed")
         return False
     return True

@@ -2,142 +2,153 @@
   "event": [
     {
       "id": "event_entry",
-      "text": "요즘 특별히 있었던 일이나 다녀오신 곳 있으세요?",
-      "severity": "high"
+      "text": "오늘 특별한 일이 있었는지 물어보세요. ",
+      "severity": "high",
+      "improvise": true
     }
   ],
   "interest": [
     {
       "id": "interest_entry",
-      "text": "평소에 즐겨 하시는 취미나 좋아하시는 활동 있으세요?",
-      "severity": "high"
+      "text": "평소 취미에 대해 물어보세요. ",
+      "severity": "high",
+      "improvise": true
     }
   ],
   "anxiety": [
     {
       "id": "gad2_1",
       "text": "최근 초조하거나 불안하거나 조마조마한 느낌이 드셨나요?",
-      "severity": "high"
+      "severity": "high",
+      "tags": ["worry"]
     },
     {
       "id": "gad2_2",
       "text": "최근 걱정을 멈추거나 조절하기 어려우셨나요?",
-      "severity": "high"
+      "severity": "high",
+      "tags": ["worry"]
     },
     {
       "id": "anxiety_low_1",
       "text": "요즘 별일 아닌 것에도 괜히 조마조마하거나 초조한 기분이 자주 드세요?",
-      "severity": "low"
+      "severity": "low",
+      "tags": ["worry"]
     },
     {
       "id": "anxiety_low_2",
       "text": "밤에 누워서 이런저런 걱정 때문에 잠들기 힘든 날이 많으세요?",
-      "severity": "low"
+      "severity": "low",
+      "tags": ["worry", "sleep"]
     },
     {
       "id": "anxiety_low_3",
       "text": "요즘 가슴이 두근거리거나 손에 땀이 나는 것처럼 몸이 긴장되는 느낌이 평소보다 자주 있으세요?",
-      "severity": "low"
+      "severity": "low",
+      "tags": ["somatic"]
     },
     {
       "id": "anxiety_low_4",
       "text": "별로 큰일도 아닌데 계속 신경 쓰이고 머릿속에서 떠나지 않는 게 있으세요?",
-      "severity": "low"
+      "severity": "low",
+      "tags": ["worry"]
     },
     {
       "id": "anxiety_low_5",
       "text": "요즘 하루 중에 마음이 편안하다고 느껴지는 순간이 얼마나 되세요?",
-      "severity": "low"
+      "severity": "low",
+      "tags": ["worry"]
     }
   ],
   "depression": [
     {
       "id": "depression_entry",
-      "text": "요즘 기분이 가라앉거나 축 처지는 날이 있는지, 매사에 흥이 안 나는 느낌이 드는지 편하게 여쭤보는 개방형 질문 (답변 내용으로 우울감·가벼운 인지 저하 신호를 함께 살핌)",
-      "angles": [
-        "요즘 기분이 가라앉거나 축 처지는 날이 있는지",
-        "매사에 흥이 안 나거나 하고 싶은 마음이 잘 안 드는지",
-        "예전보다 기운이 없고 무기력한 느낌이 드는지",
-        "요즘 마음이 편안한 편인지 아니면 좀 무거운 편인지"
-      ],
-      "note": "'무엇을 하며 지내시는지/뭐가 재밌으신지'처럼 활동을 나열하게 묻지 마세요 — 그러면 근황/취미 질문과 똑같아집니다. 활동이 아니라 본인의 기분·기력 상태 자체(예: 가라앉는다, 축 처진다, 흥이 안 난다)를 직접 여쭤보세요. 한 질문에 여러 증상을 나열해서 묻지 말고, 짧고 열린 질문 하나만 자연스럽게 던지세요.",
+      "text": "생활 의욕과 열정 관점에서 문제가 있는지 확인하기 위해 가볍게 물어보세요. ",
+      "note": "어르신이 본인의 기분·기력 상태(예: 가라앉는다, 축 처진다, 흥이 안 난다)에 대해 답변하도록 유도하세요.",
       "is_entry": true,
       "improvise": true
     },
     {
       "id": "gds5_1",
       "text": "근본적으로 생활에 불만을 느끼시나요?",
-      "severity": "high"
+      "severity": "high",
+      "tags": ["mood"]
     },
     {
       "id": "gds5_2",
       "text": "자주 지루하다고 느끼시나요?",
-      "severity": "high"
+      "severity": "high",
+      "tags": ["mood"]
     },
     {
       "id": "gds5_4",
       "text": "밖에 나가 새로운 일을 하는 것보다 집에 있는 것이 좋으신가요?",
-      "severity": "high"
+      "note": "다른 GDS 문항과 달리 이 문항은 '그렇다/집이 더 좋다'는 답이 문제있음입니다(위축·의욕저하 신호) — '아니다/밖에 나가고 싶다'는 답만 문제없음으로 판정하세요.",
+      "severity": "high",
+      "tags": ["mood"]
     },
     {
       "id": "gds5_5",
       "text": "현재의 생활방식이 매우 가치 없다고 느끼시나요?",
-      "severity": "high"
+      "severity": "high",
+      "tags": ["worthless"]
     },
     {
       "id": "gds5_3",
       "text": "혹시, 무기력감도 같이 느끼시나요?",
-      "severity": "high"
+      "severity": "high",
+      "tags": ["fatigue"]
     },
     {
       "id": "depression_low_1",
       "text": "요즘 기분이 가라앉거나 우울한 날이 일주일에 며칠 정도나 되세요?",
-      "severity": "low"
+      "severity": "low",
+      "tags": ["mood"]
     },
     {
       "id": "depression_low_2",
       "text": "그런 기분이 하루 중 잠깐씩 왔다 가는 편이세요, 아니면 하루 종일 계속되는 편이세요?",
-      "severity": "low"
+      "severity": "low",
+      "tags": ["mood"]
     },
     {
       "id": "depression_low_3",
       "text": "예전에 좋아하시던 것들(드라마, 산책, 사람 만나는 것 등)에 요즘도 흥미가 있으세요?",
-      "severity": "low"
+      "note": "다른 low 문항과 달리 이 문항은 '흥미가 있다'는 답이 문제없음이고, '흥미가 없다/줄었다'는 답이 문제있음입니다(흥미저하 신호).",
+      "severity": "low",
+      "tags": ["interest"]
     },
     {
       "id": "depression_low_4",
       "text": "그런 기분 때문에 밥 먹거나 잠자거나 사람 만나는 게 예전보다 힘드세요?",
-      "severity": "low"
+      "severity": "low",
+      "tags": ["mood"]
     },
     {
       "id": "depression_low_5",
       "text": "요즘 스스로에 대해 쓸모없다거나 죄책감이 든다는 생각이 드실 때가 있으세요?",
-      "severity": "low"
+      "severity": "low",
+      "tags": ["worthless"]
     }
   ],
   "health": [
     {
       "id": "health_entry",
-      "text": "요즘 몸 상태나 잠자리는 어떠신지 편하게 여쭤보는 개방형 질문 (답변 내용으로 건강·가벼운 불안 신호를 함께 살핌)",
-      "angles": [
-        "요즘 몸 상태가 어떤지",
-        "요즘 잠자리는 편한지",
-        "요즘 컨디션이 어떤지",
-        "요즘 어디 불편한 데는 없는지"
-      ],
-      "note": "한 질문에 여러 증상을 나열해서 묻지 말고, 짧고 열린 질문 하나만 자연스럽게 던지세요.",
+      "text": "전반적인 컨디션을 확인하기 위한 질문을 가볍게 던지세요. ",
+      "note": "어르신이 본인의 몸 컨디션(예: 건강, 수면 등)에 대한 답변을 하도록 유도하세요. ",
       "is_entry": true,
       "improvise": true
     },
     {
       "id": "sleep",
       "text": "잠은 잘 주무세요?",
-      "severity": "high"
+      "severity": "high",
+      "tags": ["sleep"]
     },
     {
       "id": "pain",
       "text": "아프신 곳 있으세요?",
-      "severity": "high"
+      "severity": "high",
+      "tags": ["pain"]
     },
     {
       "id": "health_self_rating",
@@ -147,94 +158,99 @@
     {
       "id": "frail_fatigue",
       "text": "지난 4주간 얼마나 자주 피곤하다고 느끼셨나요?",
-      "severity": "high"
+      "severity": "high",
+      "tags": ["fatigue"],
+      "enabled": false
     },
     {
       "id": "frail_stairs",
       "text": "도움 없이 혼자서, 쉬지 않고 계단 10개를 오르는 데 어려움이 있으신가요?",
-      "severity": "high"
+      "severity": "high",
+      "tags": ["mobility"],
+      "enabled": false
     },
     {
       "id": "frail_walk",
       "text": "도움 없이 혼자서, 한 블록(약 100m) 정도를 걷는 데 어려움이 있으신가요?",
-      "severity": "high"
+      "severity": "high",
+      "tags": ["mobility"],
+      "enabled": false
     },
     {
       "id": "frail_illness",
       "text": "고혈압이나 당뇨, 암 같은 거 진단받으신 적 있으세요? 심장이나 폐, 관절 쪽은 어떠세요?",
       "note": "11개 질환(고혈압/당뇨/암/만성폐질환/심근경색/울혈성심부전/협심증/천식/관절염/뇌졸중/신장질환) 중 5개 이상 여부 판단용. 딱딱하게 나열하지 말고 두세 마디로 자연스럽게 나눠 물을 것.",
-      "severity": "high"
+      "severity": "high",
+      "tags": ["chronic_illness"],
+      "enabled": false
     },
     {
       "id": "frail_weight_loss",
       "text": "지난 1년간 의도치 않게 체중이 줄어드셨나요?",
-      "severity": "high"
+      "severity": "high",
+      "tags": ["weight_loss"],
+      "enabled": false
     },
     {
       "id": "fall_gate",
       "text": "지난 1년간 넘어지신 적이 있으신가요?",
-      "severity": "high"
+      "severity": "high",
+      "tags": ["fall"],
+      "enabled": false
     },
     {
       "id": "fall_unsteady",
       "text": "서 있거나 걸을 때 불안정하다고 느끼시나요?",
-      "severity": "high"
+      "severity": "high",
+      "tags": ["fall"],
+      "enabled": false
     },
     {
       "id": "fall_worry",
       "text": "넘어질까봐 걱정되시나요?",
-      "severity": "high"
+      "severity": "high",
+      "enabled": false,
+      "tags": ["fall"]
     },
     {
       "id": "health_low_1",
       "text": "요즘 밥맛은 괜찮으세요? 예전보다 적게 드시거나 하진 않으세요?",
-      "severity": "low"
+      "severity": "low",
+      "tags": ["appetite"]
     },
     {
       "id": "health_low_2",
       "text": "요즘 잠은 잘 주무세요? 자다가 자주 깨시거나 하진 않으세요?",
-      "severity": "low"
+      "severity": "low",
+      "tags": ["sleep"]
     },
     {
       "id": "health_low_3",
       "text": "요즘 어디 특별히 아프거나 불편한 데는 없으세요?",
-      "severity": "low"
+      "severity": "low",
+      "tags": ["pain"]
     },
     {
       "id": "health_low_4",
       "text": "요즘 걷거나 움직이실 때 힘들거나 예전보다 힘에 부치는 느낌 있으세요?",
-      "severity": "low"
+      "severity": "low",
+      "tags": ["mobility"]
     }
   ],
   "medication": [
     {
       "id": "medication_entry",
-      "text": "오늘 약은 챙겨 드셨나요?",
-      "severity": "high"
+      "text": "오늘 약 복용 여부를 물어보세요. ",
+      "severity": "high",
+      "improvise": true
     }
   ],
   "meal": [
     {
       "id": "meal_entry",
-      "text": "오늘 식사는 하셨나요?",
-      "severity": "high"
-    }
-  ],
-  "emergency": [
-    {
-      "id": "emergency_entry",
-      "text": "지금 위급한 상태신가요? 필요하시면 주변 응급실이나 병원 정보를 바로 알려드릴게요.",
-      "severity": "high"
-    },
-    {
-      "id": "emergency_fall",
-      "text": "혹시 지금 다치셨거나 넘어지신 상태세요? 움직이기 힘드시면 바로 도와드릴게요.",
-      "severity": "high"
-    },
-    {
-      "id": "emergency_breath",
-      "text": "지금 숨쉬기 힘드시거나 가슴이 답답하지는 않으세요? 그러시면 바로 응급실 연결해드릴게요.",
-      "severity": "high"
+      "text": "오늘 식사 여부를 물어보세요. ",
+      "severity": "high",
+      "improvise": true
     }
   ],
   "cognitive": [
@@ -249,59 +265,68 @@
       "text": "아까 말씀드렸던 세 단어가 기억나시나요?",
       "note": "정답을 어르신에게 노출하지 말 것.",
       "depends_on": "sis_encode",
-      "min_gap": 2,
+      "gap": 2,
       "severity": "high"
     },
     {
       "id": "sis_day",
       "text": "오늘이 무슨 요일인지 아시나요?",
       "note": "특정 요일을 언급하며 맞는지 확인하는 식으로 절대 묻지 말 것. 이 문장 그대로 개방형으로 물을 것.",
-      "severity": "high"
+      "severity": "high",
+      "enabled": false
     },
     {
       "id": "sis_month",
       "text": "지금이 몇 월인지 아시나요?",
       "note": "특정 월을 언급하며 맞는지 확인하는 식으로 절대 묻지 말 것. 이 문장 그대로 개방형으로 물을 것.",
-      "severity": "high"
+      "severity": "high",
+      "enabled": false
     },
     {
       "id": "sis_year",
       "text": "올해가 몇 년도인지 아시나요?",
       "note": "특정 연도를 언급하며 맞는지 확인하는 식으로 절대 묻지 말 것. 이 문장 그대로 개방형으로 물을 것.",
-      "severity": "high"
+      "severity": "high",
+      "enabled": false
     },
     {
       "id": "cognitive_low_1",
       "text": "어제 저녁에 뭐 드셨어요?",
-      "severity": "low"
+      "severity": "low",
+      "tags": ["memory"]
     },
     {
       "id": "cognitive_low_2",
       "text": "오늘 아침에 집에서 나올 때 문 잠그신 거 기억나세요?",
-      "severity": "low"
+      "severity": "low",
+      "tags": ["memory"]
     },
     {
       "id": "cognitive_low_3",
       "text": "지난 주말에 뭐 하셨어요?",
-      "severity": "low"
+      "severity": "low",
+      "tags": ["memory"]
     },
     {
       "id": "cognitive_low_4",
       "text": "오늘 저랑 통화하기(또는 만나기) 전에 마지막으로 누구랑 얘기하셨어요?",
-      "severity": "low"
+      "severity": "low",
+      "tags": ["memory"]
     },
     {
       "id": "cognitive_low_5",
       "text": "최근에 본 드라마나 뉴스 중에 기억나는 거 있으세요?",
-      "severity": "low"
+      "severity": "low",
+      "tags": ["memory"]
     }
   ],
   "closing": [
     {
       "id": "closing_entry",
-      "text": "이제 슬슬 마무리해야 할 것 같아요. 혹시 더 궁금한 점이나 도와드릴 점 있을까요?",
-      "note": "이 질문의 assessment는 증상/우려가 아니라 '정말 더 궁금하거나 도움이 필요한 게 없는지'를 기준으로 판정하세요. 어르신이 명확하게 '없다/괜찮다'는 취지로 답한 경우에만 문제없음입니다. 다른 질문을 하거나(예: 신원 확인), '네 그렇군요'처럼 애매하게 얼버무리거나, 그 질문에 대한 답을 듣고 자연스럽게 넘어간 경우는 문제없음이 아닙니다 — 문제있음으로 판정해서 정말 더 궁금한 게 없는지 한 번 더 확인하세요.",
-      "severity": "high"
+      "text": "마무리 지을 시간이라고 안내 하면서, 더 궁금한 거나 도움이 필요한 게 있는지 체크하세요. ",
+      "note": "도움이 필요하다고 하면 그 요청부터 짧게 챙겨드리세요 — 필요하면 확인 질문은 하나만 하고, 마무리 질문(더 궁금한 점 있는지)을 같은 턴에 같이 묻지 마세요. 그 답을 들으면 반드시 check_in을 다시 호출하세요 — 그러면 마무리 질문을 다시 물어보라고 안내해 드립니다. ",
+      "severity": "high",
+      "improvise": true
     }
   ]
 }

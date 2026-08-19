@@ -20,22 +20,17 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # ? inbox/outbox부분 로직 검토 필요
 RUNTIME_DIR = ROOT / "runtime" # worker.py가 드레인하는 append 로그/원장류 임시 파일 전용 폴더
-GUARDIAN_ALERTS_FILE = RUNTIME_DIR / "alerts" / "inbox.jsonl" # new+severity=high 감지 즉시 여기 한 줄 추가(agent/tools.py)
 CALL_RESULT_OUTBOX = RUNTIME_DIR / "call_results" / "outbox.jsonl" # 통화 종료 시 여기 한 줄 추가 (worker.py가 Spring으로 드레인)
+# 로컬 테스트용 — 실제 SMS 발송/Spring 연동과 무관하게, 통화마다 만들어진 요약 SMS 본문을 그대로
+# 텍스트 파일로 남긴다. guardian_phone_number가 없거나 SMS 인증정보가 없어도(로컬 개발 환경)
+# 요약 내용 자체는 항상 눈으로 확인할 수 있게 하기 위한 디버그 산출물 — Spring/worker.py와 무관.
+CALL_SUMMARIES_DIR = RUNTIME_DIR / "call_summaries"
 
 def spring_timestamp(dt: datetime | None = None) -> str:
     # * Spring의 LocalDateTime과 맞는 tz 없는 ISO-8601 문자열(예: "2026-06-18T10:00:00").
 
     dt = dt or datetime.now(ZoneInfo("Asia/Seoul"))
     return dt.replace(tzinfo=None).isoformat(timespec="seconds")
-
-def new_alert_id() -> str:
-    # A-1000, A-1001, ... — numbered by how many alerts are already filed.
-
-    count = 0
-    if GUARDIAN_ALERTS_FILE.exists():
-        count = sum(1 for line in GUARDIAN_ALERTS_FILE.read_text().splitlines() if line.strip())
-    return f"A-{1000 + count}"
 
 def _default_profile() -> dict:
     # * 어르신 히스토리가 아직 없을 경우, 빈 파일 경로 초기화
@@ -72,14 +67,33 @@ def new_call_state(call_id: str, profile: dict | None) -> dict:
 # 통화 결과 파일 기록 (worker.py가 드레인)
 # --------------------------------------------------------------------------
 
+def _write_call_summary_debug_file(
+    cr_id: str, recipient_id, recipient_name: str, guardian_phone_number: str | None, summary_sms_text: str,
+) -> None:
+    # * 로컬 테스트용 산출물 — Spring/ClawOps 연동 여부와 무관하게 통화가 끝날 때마다 요약 SMS
+    # * 본문을 그대로 파일로 남긴다(runtime/call_summaries/CR-xxxx.txt). guardian_phone_number가
+    # * 없어 실제로는 문자가 안 나가는 경우(로컬 개발 환경 등)에도 내용을 눈으로 확인할 수 있다.
+    CALL_SUMMARIES_DIR.mkdir(parents=True, exist_ok=True)
+    header = (
+        f"call_result_id: {cr_id}\n"
+        f"recipient_id: {recipient_id}\n"
+        f"recipient_name: {recipient_name}\n"
+        f"guardian_phone_number: {guardian_phone_number or '(없음 — 실제 SMS 발송 대상 아님)'}\n"
+        f"generated_at: {spring_timestamp()}\n"
+        "---\n"
+    )
+    (CALL_SUMMARIES_DIR / f"{cr_id}.txt").write_text(header + summary_sms_text, encoding="utf-8")
+
+
 def write_call_result_outbox(state: dict, status: str) -> None:
-    # * Spring 전송용 원본 데이터를 로컬에 남긴다(실제 POST는 worker.py가 폴링)
-    # * 브라우저 데모는 skip
+    # * Spring 전송용 원본 데이터를 로컬에 남긴다(실제 POST는 worker.py가 폴링) — recipient_id가
+    # * 없는 브라우저 데모는 Spring 아웃박스(아래 CALL_RESULT_OUTBOX 파일)는 건너뛰지만, 로컬
+    # * 테스트용 요약 디버그 파일(_write_call_summary_debug_file)은 recipient_id 유무와 무관하게
+    # * 항상 남긴다 — 사용자가 주로 브라우저 데모로 로컬 테스트를 하기 때문에, 여기서까지 건너뛰면
+    # * 요약 기능을 로컬에서 확인할 방법이 없어진다.
 
     metadata = state.get("_metadata") or {}
     recipient_id = metadata.get("recipient_id")
-    if recipient_id is None:
-        return
 
     # 통화가 조기 종료(어르신이 먼저 끊음, 위급상황 등)되면 일부 스테이지는 아예 못 다룰 수
     # 있다 — completed가 아닌 스테이지를 "미확인"으로 남겨 Spring/프론트까지 흘려보낸다
@@ -94,10 +108,31 @@ def write_call_result_outbox(state: dict, status: str) -> None:
     # 아니라 "간접 스크리닝에서 이상 없었다"는 뜻이다 — serve/Spring으로 나가기 직전에 반영한다.
     tools.backfill_implicit_screening(state["logic_data"])
 
+    # 통화 종료 시 보호자에게 보낼 요약 SMS 본문 — 보호자 전화번호는 통화 시작 시 Spring이
+    # 넘겨준 profile에 실려 온다(check_external_api_necessity가 이미 같은 profile에서 address를
+    # 읽는 것과 동일한 경로, integrations/dispatch.py 참고). 없으면(Spring이 아직 이 필드를 안
+    # 보내주거나 보호자가 미등록인 경우) worker.py가 조용히 SMS 발송을 건너뛴다.
+    # 예전 emergency-alerts 응답이 "010-1234-5678"처럼 하이픈 섞어 내려보냈던 것과 같은 이유로,
+    # 여기서도 방어적으로 하이픈/공백을 제거해둔다(ClawOps가 정규화된 번호를 기대함).
+    guardian_phone_number = (metadata.get("profile") or {}).get("guardian_phone_number")
+    if guardian_phone_number:
+        guardian_phone_number = guardian_phone_number.replace("-", "").replace(" ", "")
+    recipient_name = (metadata.get("profile") or {}).get("recipient_name") or "대상자"
+    summary_sms_text = tools.build_call_summary_text(state["logic_data"], buffer, metadata.get("profile") or {})
+    profile_updates_text = tools.build_profile_updates_text(state["profile_updates"])
+    if profile_updates_text:
+        summary_sms_text += "\n\n[근황/취미 업데이트]\n" + profile_updates_text
+
+    cr_id = f"CR-{uuid.uuid4().hex[:12]}"  # worker.py의 처리완료 원장(ledger) 키 — 요약 디버그 파일명도 같이 씀
+    _write_call_summary_debug_file(cr_id, recipient_id, recipient_name, guardian_phone_number, summary_sms_text)
+
+    if recipient_id is None:
+        return  # 브라우저 데모/테스트 — Spring 아웃박스는 여기서 스킵(디버그 파일은 이미 위에서 남겼음)
+
     CALL_RESULT_OUTBOX.parent.mkdir(parents=True, exist_ok=True)
     with open(CALL_RESULT_OUTBOX, "a") as f:
         f.write(json.dumps({
-            "id": f"CR-{uuid.uuid4().hex[:12]}",  # worker.py의 처리완료 원장(ledger) 키
+            "id": cr_id,
             "recipient_id": recipient_id,
             "call_log": {
                 "started_at": state.get("_call_started_at"),
@@ -111,6 +146,9 @@ def write_call_result_outbox(state: dict, status: str) -> None:
             "profile_updates": state["profile_updates"],
             "incomplete_categories": incomplete_categories,
             "unresolved_questions": state.get("_unresolved_questions") or [],
+            "guardian_phone_number": guardian_phone_number,
+            "recipient_name": recipient_name,
+            "summary_sms_text": summary_sms_text,
             "filed_at": time.time(),
         }, ensure_ascii=False) + "\n")
 
@@ -119,6 +157,8 @@ def write_minimal_call_result(recipient_id, status: str) -> None:
     # * started_at을 None으로 두면 Spring CallResultService.saveAll()의 필수값 검증(둘 다 non-null)에
     # * 걸려서 이 결과가 영원히 저장 실패 → 재시도 루프에 빠진다. 시도한 시각을 그대로 쓴다(연결이 안
     # * 됐을 뿐 "시도"는 이 시점에 일어났으므로 의미상으로도 맞다).
+    # * 통화가 시작도 못 했으니 요약할 내용이 없다 — guardian_phone_number도 없어 worker.py가
+    # * 요약 SMS 발송을 자동으로 건너뛴다.
 
     now = spring_timestamp()
     CALL_RESULT_OUTBOX.parent.mkdir(parents=True, exist_ok=True)
@@ -128,5 +168,6 @@ def write_minimal_call_result(recipient_id, status: str) -> None:
             "recipient_id": recipient_id,
             "call_log": {"started_at": now, "ended_at": now, "status": status},
             "call_log_entries": [], "logic_data": {}, "emergencies": [], "profile_updates": [],
+            "guardian_phone_number": None, "recipient_name": None, "summary_sms_text": "",
             "filed_at": time.time(),
         }, ensure_ascii=False) + "\n")
