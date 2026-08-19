@@ -96,13 +96,6 @@ DISCOMFORT_CATEGORY_VALUES: list[str] = [
 # 끝내지 않고 validate로 계속 진행시킨다(agent/tools.py의 _apply_assessment 참고).
 FIXED_SEQUENCE_STAGES: set[StageType] = {StageType.COGNITIVE}
 
-# EVENT/INTEREST 전용 — entry(새로 있었던 일) + 기존 항목 재확인, 최대 두 문항을 한 통화에서 같이
-# 묻는다(_build_personalized_questions 참고). 이 둘은 baseline이라 stage_state.severity가 통화
-# 내내 None으로 남아있어(discomfort_flags로 반응형 스폰될 때만 채워짐) FIXED_SEQUENCE_STAGES의
-# severity=="high" 조건에 안 걸린다 — 그래서 별도 세트로 둔다(agent/tools.py의 _apply_assessment
-# still_has_items 참고).
-TWO_QUESTION_STAGES: set[StageType] = {StageType.EVENT, StageType.INTEREST}
-
 QUESTION_FAIL_LIMIT = 2  # 이 횟수 넘게 실패/불일치가 반복되면 더 이상 재시도하지 않고 포기 처리(무한루프 방지)
 
 
@@ -386,23 +379,17 @@ def _build_personalized_questions(
     entry_id: str, fallback_entry_text: str, item_id_prefix: str, item_question_template: str,
     names: list[str],
 ) -> list[QuestionCandidate]:
-    # * entry(열린 "새로 있었던 일/취미 있으세요?" 질문)는 기존 기록 유무와 무관하게 항상 낸다 —
-    # * 예전엔 names가 있으면 entry를 통째로 빼고 기존 항목 재확인 질문으로만 채웠는데, 그러면
-    # * 완전히 새로운 근황(예: 손주 결혼식)을 캐치할 질문 자체가 통화에서 사라졌다(실제 사례).
-    # * is_entry=True라 next_question()이 이걸 항상 먼저 뽑고, TWO_QUESTION_STAGES에 EVENT/
-    # * INTEREST가 포함돼 있어(agent/tools.py의 _apply_assessment still_has_items 참고) 이거
-    # * 하나만 묻고 바로 완료되지 않는다. names가 있으면 그중 하나를 골라 기존 항목 재확인
-    # * 질문을 이어서 하나 더 묻는다(전부 다 묻진 않음 — 최대 2문항 유지).
-    entry = QuestionCandidate(id=entry_id, text=fallback_entry_text, severity="high", improvise=True, is_entry=True)
     if not names:
-        return [entry]
-    picked = random.choice(names)
-    item = QuestionCandidate(
-        id=f"{item_id_prefix}_1",
-        text=item_question_template.format(name=picked),
-        severity="high",
-    )
-    return [entry, item]
+        return [QuestionCandidate(id=entry_id, text=fallback_entry_text, severity="high", improvise=True)]
+    shuffled = random.sample(names, len(names))
+    return [
+        QuestionCandidate(
+            id=f"{item_id_prefix}_{i}",
+            text=item_question_template.format(name=name),
+            severity="high",
+        )
+        for i, name in enumerate(shuffled, start=1)
+    ]
 
 
 def build_interest_questions(profile: dict) -> list[QuestionCandidate]:
