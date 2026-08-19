@@ -10,8 +10,6 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
-from integrations import sms
-
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -148,21 +146,12 @@ def push_call_result(entry: dict) -> None:
     resp.raise_for_status()
 
 
-def _send_summary_sms(entry: dict) -> None:
-    # * 통화 요약 SMS는 편의 기능이라, 실패해도 call-result 자체의 처리완료 여부(ledger)에는
-    # * 영향을 주지 않는다 — 호출부(process_call_results_once)가 이 함수를 별도 try/except로
-    # * 감싼다. 여기서도 한 번 더 흡수해 로그만 남긴다.
-    phone = entry.get("guardian_phone_number")
-    if not phone:
-        return  # Spring profile에 보호자 번호가 없거나 미등록 — 조용히 스킵
-    summary_text = entry.get("summary_sms_text") or ""
-    if not summary_text:
-        return
-    if not sms.send_call_summary_sms(phone, entry.get("recipient_name") or "대상자", summary_text):
-        log.warning("call summary SMS failed: %s", entry["id"])
-
-
 def process_call_results_once() -> int:
+    # * 통화 요약 SMS는 여기서 안 보낸다 — server.py가 통화 종료 즉시(brain.write_call_result_outbox
+    # * 반환값으로) 직접 보낸다(send_resource_sms와 동일한 패턴). 예전엔 push_call_result(Spring
+    # * POST) 성공 후에만 보내서, Spring 전송이 실패하면 guardian_phone_number가 정상인데도 SMS가
+    # * 영영 안 나가는 문제가 있었다 — 통화 결과를 Spring에 올리는 것과 보호자에게 SMS를 보내는 건
+    # * 서로 무관한 일이라 분리했다.
     handled = 0
     for entry in pending_call_results():
         log.info("new call result: %s (recipient_id=%s)", entry["id"], entry["recipient_id"])
@@ -172,11 +161,6 @@ def process_call_results_once() -> int:
             handled += 1
         except Exception:
             log.exception("failed to push call result %s — will retry next poll", entry["id"])
-            continue
-        try:
-            _send_summary_sms(entry)
-        except Exception:
-            log.exception("call summary SMS raised unexpectedly: %s", entry["id"])
     return handled
 
 

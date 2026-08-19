@@ -21,7 +21,7 @@ from fastapi import (
 from fastapi.staticfiles import StaticFiles
 
 from agent import brain, prompts, tools as agent_tools
-from integrations import dispatch, worker
+from integrations import dispatch, sms, worker
 from sinks import OutputSink, BrowserSink, CallSink, call_media_rms, call_media_to_pcm24k
 
 import gemini_loader
@@ -575,6 +575,21 @@ async def _pump_upstream(upstream, sink: OutputSink, state: dict, session_id: st
 # ws endpoint
 # --------------------------------------------------------------------------
 
+async def _send_call_summary_sms(summary: dict | None, session_id: str) -> None:
+    # * brain.write_call_result_outbox()가 돌려준 요약을 통화 종료 즉시 보호자에게 보낸다 —
+    # * send_resource_sms(도움처 안내 문자)와 동일하게 Spring/worker.py 왕복 없이 바로 나간다.
+    # * summary가 None이면(recipient_id 없는 브라우저 데모, 보호자 미등록 등) 조용히 아무것도 안 한다.
+    if summary is None:
+        return
+    try:
+        ok = await sms.send_call_summary_sms(
+            summary["guardian_phone_number"], summary["recipient_name"], summary["summary_sms_text"],
+        )
+        if not ok:
+            log.warning("call %s: 통화 요약 SMS 발송 실패", session_id)
+    except Exception:
+        log.exception("call %s: 통화 요약 SMS 발송 중 오류", session_id)
+
 @app.websocket("/ws/browser")
 async def browser_ws(client_ws: WebSocket) -> None:
     # * 브라우저 데모용 엔드포인트 — 메인 서버 트리거 없이, 프론트 폼에서 받은 profile로 통화 세션을 연다.
@@ -651,10 +666,12 @@ async def browser_ws(client_ws: WebSocket) -> None:
         # 브라우저 데모는 recipient_id가 없어 Spring 아웃박스 기록은 call_stream_ws(실제 전화)
         # 경로에서만 한다 — 하지만 로컬 테스트용 요약 디버그 파일(runtime/call_summaries/)은
         # recipient_id 없이도 write_call_result_outbox가 남기므로 여기서도 호출한다.
+        summary = None
         try:
-            brain.write_call_result_outbox(state, "COMPLETED")
+            summary = brain.write_call_result_outbox(state, "COMPLETED")
         except Exception:
             log.exception("call %s: failed to write local summary debug file", session_id)
+        await _send_call_summary_sms(summary, session_id)
         try:
             await client_ws.close()
         except Exception:
@@ -759,7 +776,12 @@ async def call_stream_ws(client_ws: WebSocket) -> None:
                     await call_client().calls.update(call_id, status="completed")
                 except Exception:
                     log.exception("failed to hang up phone call %s (%s)", session_id, call_id)
-            brain.write_call_result_outbox(state, status)
+            summary = None
+            try:
+                summary = brain.write_call_result_outbox(state, status)
+            except Exception:
+                log.exception("phone call %s: failed to write call result outbox", session_id)
+            await _send_call_summary_sms(summary, session_id)
         try:
             await client_ws.close()
         except Exception:

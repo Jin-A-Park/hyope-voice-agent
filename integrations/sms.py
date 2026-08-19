@@ -8,12 +8,11 @@ import logging
 import os
 from datetime import datetime
 
-from clawops import AsyncClawOps, ClawOps
+from clawops import AsyncClawOps
 
 log = logging.getLogger("dispatcher")
 
 _client: AsyncClawOps | None = None
-_sync_client: ClawOps | None = None
 
 
 def _sms_client() -> AsyncClawOps:
@@ -24,17 +23,6 @@ def _sms_client() -> AsyncClawOps:
             account_id=os.environ["CLAWOPS_ACCOUNT_ID"],
         )
     return _client
-
-
-def _sms_client_sync() -> ClawOps:
-    # integrations/worker.py는 asyncio 없이 도는 폴링 스크립트라 동기 클라이언트가 필요하다.
-    global _sync_client
-    if _sync_client is None:
-        _sync_client = ClawOps(
-            api_key=os.environ["CLAWOPS_API_KEY"],
-            account_id=os.environ["CLAWOPS_ACCOUNT_ID"],
-        )
-    return _sync_client
 
 
 def _resource_sms_body(resources: list[dict]) -> str:
@@ -69,15 +57,18 @@ def _call_summary_sms_body(recipient_name: str, summary_text: str) -> str:
     )
 
 
-def send_call_summary_sms(to: str, recipient_name: str, summary_text: str) -> bool:
-    """통화 종료 후(integrations/worker.py의 동기 폴링 루프에서) 보호자에게 통화 요약 문자 발송.
+async def send_call_summary_sms(to: str, recipient_name: str, summary_text: str) -> bool:
+    """통화 종료 직후(server.py의 call-end 처리에서, send_resource_sms와 동일한 패턴으로) 즉시
+    보호자에게 통화 요약 문자 발송.
 
     성공하면 True. 발신 실패는 send_resource_sms와 동일하게 여기서 흡수해 False만 돌려준다 —
-    통화 결과 자체는 이미 Spring에 성공적으로 전달됐으니, 요약 SMS 하나 실패했다고 재시도 루프를
-    돌 이유는 없다(호출부가 로그만 남기고 넘어간다).
+    Spring으로의 통화 결과 전송(worker.py)과는 완전히 독립적이다. 예전엔 이 SMS를 worker.py가
+    push_call_result(Spring POST) 성공한 뒤에만 보냈는데, Spring 전송이 실패하면(페이로드 거부,
+    일시적 5xx 등) guardian_phone_number가 정상인데도 SMS가 영영 안 나가는 문제가 실제로
+    있었다 — 통화가 끝나는 즉시, Spring 전송 성공 여부와 무관하게 보낸다.
     """
     try:
-        _sms_client_sync().messages.create(
+        await _sms_client().messages.create(
             to=to, from_=os.environ["CLAWOPS_FROM_NUMBER"],
             body=_call_summary_sms_body(recipient_name, summary_text), type="sms",
         )

@@ -85,12 +85,21 @@ def _write_call_summary_debug_file(
     (CALL_SUMMARIES_DIR / f"{cr_id}.txt").write_text(header + summary_sms_text, encoding="utf-8")
 
 
-def write_call_result_outbox(state: dict, status: str) -> None:
+def write_call_result_outbox(state: dict, status: str) -> dict | None:
     # * Spring 전송용 원본 데이터를 로컬에 남긴다(실제 POST는 worker.py가 폴링) — recipient_id가
     # * 없는 브라우저 데모는 Spring 아웃박스(아래 CALL_RESULT_OUTBOX 파일)는 건너뛰지만, 로컬
     # * 테스트용 요약 디버그 파일(_write_call_summary_debug_file)은 recipient_id 유무와 무관하게
     # * 항상 남긴다 — 사용자가 주로 브라우저 데모로 로컬 테스트를 하기 때문에, 여기서까지 건너뛰면
     # * 요약 기능을 로컬에서 확인할 방법이 없어진다.
+    # *
+    # * 반환값: 통화 요약 SMS를 호출부(server.py)가 그 자리에서 바로 보낼 수 있게
+    # * {"guardian_phone_number", "recipient_name", "summary_sms_text"}를 돌려준다 — guardian_phone_number가
+    # * 없으면(브라우저 데모/보호자 미등록) None. send_resource_sms(도움처 안내 문자)가 Spring/worker.py
+    # * 왕복 없이 통화 중 바로 나가는 것과 같은 패턴이다 — 예전엔 이 요약 SMS를 worker.py가
+    # * push_call_result(Spring POST) 성공한 뒤에만 보냈는데, Spring 전송이 실패하면(예: 페이로드
+    # * 거부, 일시적 5xx) SMS까지 영영 안 나가는 문제가 실제로 있었다(guardian_phone_number는
+    # * 정상적으로 채워져 있는데도 문자가 안 감). Spring 전송 성공 여부와 SMS 발송은 서로 무관해야
+    # * 하므로 분리한다.
 
     metadata = state.get("_metadata") or {}
     recipient_id = metadata.get("recipient_id")
@@ -126,8 +135,18 @@ def write_call_result_outbox(state: dict, status: str) -> None:
     cr_id = f"CR-{uuid.uuid4().hex[:12]}"  # worker.py의 처리완료 원장(ledger) 키 — 요약 디버그 파일명도 같이 씀
     _write_call_summary_debug_file(cr_id, recipient_id, recipient_name, guardian_phone_number, summary_sms_text)
 
+    summary_for_sms = (
+        {
+            "guardian_phone_number": guardian_phone_number,
+            "recipient_name": recipient_name,
+            "summary_sms_text": summary_sms_text,
+        }
+        if guardian_phone_number
+        else None
+    )
+
     if recipient_id is None:
-        return  # 브라우저 데모/테스트 — Spring 아웃박스는 여기서 스킵(디버그 파일은 이미 위에서 남겼음)
+        return summary_for_sms  # 브라우저 데모/테스트 — Spring 아웃박스는 여기서 스킵(디버그 파일은 이미 위에서 남겼음)
 
     CALL_RESULT_OUTBOX.parent.mkdir(parents=True, exist_ok=True)
     with open(CALL_RESULT_OUTBOX, "a") as f:
@@ -152,13 +171,14 @@ def write_call_result_outbox(state: dict, status: str) -> None:
             "filed_at": time.time(),
         }, ensure_ascii=False) + "\n")
 
+    return summary_for_sms
+
 def write_minimal_call_result(recipient_id, status: str) -> None:
     # * state 없이(발신 실패, 무응답/통화중 콜백처럼 통화가 시작도 못 한 경우) 빈 값으로 최소 결과만 기록한다.
     # * started_at을 None으로 두면 Spring CallResultService.saveAll()의 필수값 검증(둘 다 non-null)에
     # * 걸려서 이 결과가 영원히 저장 실패 → 재시도 루프에 빠진다. 시도한 시각을 그대로 쓴다(연결이 안
     # * 됐을 뿐 "시도"는 이 시점에 일어났으므로 의미상으로도 맞다).
-    # * 통화가 시작도 못 했으니 요약할 내용이 없다 — guardian_phone_number도 없어 worker.py가
-    # * 요약 SMS 발송을 자동으로 건너뛴다.
+    # * 통화가 시작도 못 했으니 요약할 내용이 없다 — guardian_phone_number도 없다.
 
     now = spring_timestamp()
     CALL_RESULT_OUTBOX.parent.mkdir(parents=True, exist_ok=True)
